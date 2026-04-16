@@ -1,0 +1,2129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Realtime Sports Simuator SXM</title>
+    <style>
+      @font-face {
+        font-family: "Helvetica Now Text";
+        src: url("https://cdn.web-cloud.siriusxm.com/sxm-player-web/shared/assets/helvetica-now-text-v1-latin-400-ngs-K4sz.woff2") format("woff2");
+        font-weight: 400;
+        font-style: normal;
+      }
+      @font-face {
+        font-family: "Helvetica Now Text";
+        src: url("https://cdn.web-cloud.siriusxm.com/sxm-player-web/shared/assets/helvetica-now-text-v1-latin-500-C-zOOadm.woff2") format("woff2");
+        font-weight: 500;
+        font-style: normal;
+      }
+      @font-face {
+        font-family: "Helvetica Now Text";
+        src: url("https://cdn.web-cloud.siriusxm.com/sxm-player-web/shared/assets/helvetica-now-text-v1-latin-700-Ct5ifVf9.woff2") format("woff2");
+        font-weight: 700;
+        font-style: normal;
+      }
+      @font-face {
+        font-family: "Helvetica Now Display";
+        src: url("https://cdn.web-cloud.siriusxm.com/sxm-player-web/shared/assets/helvetica-now-display-v1-latin-700-BJ_kj3uG.woff2") format("woff2");
+        font-weight: 700;
+        font-style: normal;
+      }
+      html, body, #root {
+        margin: 0;
+        min-height: 100%;
+        background: #07090f;
+      }
+      body {
+        min-height: 100vh;
+      }
+    </style>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="./sports-metadata-datasets.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="text/babel" data-presets="react">
+      const { useState, useMemo, useEffect, useRef } = React;
+
+const ESPN = "https://a.espncdn.com/i/teamlogos/soccer/500/";
+const SXM_IMG = "https://imgsrv-prod.origin.streaming.siriusxm.com/";
+
+const RAW_DATASETS = window.SXM_SPREADSHEET_DATASETS || {};
+const HIDDEN_LEAGUE_KEYS = new Set(["nascar","f1","indycar"]);
+const WC_TEAM_OVERRIDES = {
+  ALG:{flag:"dz"}, ARG:{flag:"ar"}, AUS:{flag:"au"}, AUT:{flag:"at"}, BEL:{flag:"be"}, BIH:{flag:"ba"},
+  BRA:{flag:"br"}, CPV:{flag:"cv"}, CAN:{flag:"ca"}, COL:{flag:"co"}, COD:{flag:"cd"}, CRO:{flag:"hr"},
+  CUW:{flag:"cw"}, CIV:{flag:"ci"}, CZE:{flag:"cz"}, ECU:{flag:"ec"}, EGY:{flag:"eg"}, ENG:{flag:"gb-eng"},
+  FRA:{flag:"fr"}, GER:{flag:"de"}, GHA:{flag:"gh"}, HAI:{flag:"ht"}, IRN:{flag:"ir"}, IRQ:{flag:"iq"},
+  JPN:{flag:"jp"}, JOR:{flag:"jo"}, KOR:{flag:"kr"}, MEX:{flag:"mx"}, MAR:{flag:"ma"}, NED:{flag:"nl"},
+  NZL:{flag:"nz"}, NOR:{flag:"no"}, PAN:{flag:"pa"}, PAR:{flag:"py"}, POR:{flag:"pt"}, QAT:{flag:"qa"},
+  KSA:{flag:"sa"}, SCO:{flag:"gb-sct"}, SEN:{flag:"sn"}, RSA:{flag:"za"}, ESP:{flag:"es"}, SWE:{flag:"se"},
+  SUI:{flag:"ch"}, TUN:{flag:"tn"}, TUR:{flag:"tr"}, USA:{flag:"us"}, URU:{flag:"uy"}, UZB:{flag:"uz"},
+};
+
+function ensureDatasetTeams(dataset){
+  const baseTeams = Array.isArray(dataset?.teams) ? dataset.teams.map(team=>{
+    const merged = dataset?.isWC ? {...team, ...(WC_TEAM_OVERRIDES[team.abbr] || {})} : {...team};
+    return {
+      ...merged,
+      fullName: merged.fullName || merged.name || merged.abbr,
+      name: merged.name || merged.fullName || merged.abbr,
+      color: normalizeHexColor(merged.color, "#111111"),
+    };
+  }) : [];
+  if(baseTeams.length >= 2) return baseTeams;
+  const fallbackColor = normalizeHexColor(dataset?.leagueColor, "#111111");
+  const altColor = fg(fallbackColor) === "#ffffff" ? "#E2E8F0" : "#0F172A";
+  return [
+    baseTeams[0] || { abbr:"AWY", name:"Away", fullName:"Away", color:fallbackColor, logo:"" },
+    baseTeams[1] || { abbr:"HME", name:"Home", fullName:"Home", color:altColor, logo:"" },
+  ];
+}
+
+const DATASETS = Object.fromEntries(
+  Object.entries(RAW_DATASETS)
+  .filter(([key])=>!HIDDEN_LEAGUE_KEYS.has(key))
+  .map(([key, dataset])=>[
+    key,
+    {...dataset, teams:ensureDatasetTeams(dataset)},
+  ])
+);
+const HOME_NAV_LEAGUES = Object.values(DATASETS).map(dataset=>({
+  abbr:dataset.label,
+  image:dataset.leagueImage,
+}));
+const STATES = ["Upcoming","Live","Halftime","Extra Time","Full Time","Final"];
+
+// ─── Utils ───────────────────────────────────────────────────────────────────
+function luma(hex="#111") {
+  const c = hex.replace("#","").padEnd(6,"0").slice(0,6);
+  const r=parseInt(c.slice(0,2),16),g=parseInt(c.slice(2,4),16),b=parseInt(c.slice(4,6),16);
+  return (r*299+g*587+b*114)/1000;
+}
+function fg(hex){ return luma(hex)>145?"#0d0d0d":"#ffffff"; }
+function flagImageUrl(code){
+  if(!code) return "";
+  const special = {
+    "gb-eng":"https://upload.wikimedia.org/wikipedia/en/b/be/Flag_of_England.svg",
+    "gb-sct":"https://upload.wikimedia.org/wikipedia/commons/1/10/Flag_of_Scotland.svg",
+  };
+  return special[code] || `https://flagcdn.com/${code}.svg`;
+}
+function flagEmoji(code){
+  const sp={"gb-eng":"🏴󠁧󠁢󠁥󠁮󠁧󠁿","gb-sct":"🏴󠁧󠁢󠁳󠁣󠁴󠁿"};
+  if(sp[code]) return sp[code];
+  if(!code||code.length!==2) return "🏳️";
+  return code.toUpperCase().split("").map(c=>String.fromCodePoint(127397+c.charCodeAt(0))).join("");
+}
+function clampScore(value){
+  return Number.isFinite(value) ? Math.max(0, Math.min(20, value)) : 0;
+}
+function normalizeHexColor(value, fallback="#111111"){
+  const raw = String(value || "").trim().replace(/^#/,"");
+  if(/^[0-9a-fA-F]{6}$/.test(raw)) return `#${raw.toUpperCase()}`;
+  return fallback;
+}
+function ensureDifferentIndex(nextIdx, otherIdx, total){
+  if(total <= 1) return 0;
+  if(nextIdx !== otherIdx) return nextIdx;
+  return (nextIdx + 1) % total;
+}
+function getDefaultAwayIndex(teams){
+  const total = Array.isArray(teams) ? teams.length : 0;
+  if(total <= 1) return 0;
+  return Math.min(4, total - 1);
+}
+function getDisplayMatchup(home, away, homeScore, awayScore, isSoccer){
+  if(isSoccer){
+    return { home, away, homeScore, awayScore, homeIdxFirst:true };
+  }
+  return {
+    home: away,
+    away: home,
+    homeScore: awayScore,
+    awayScore: homeScore,
+    homeIdxFirst:false,
+  };
+}
+function normalizeClock(state, rawClock){
+  if(state === "Upcoming") return "";
+  if(state === "Halftime") return "HT";
+  if(state === "Full Time" || state === "Final") return "FT";
+  return rawClock;
+}
+function formatFeedTimestamp(value){
+  if(!value) return "Waiting for update";
+  const date = new Date(value);
+  if(Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("en-US", {
+    month:"short",
+    day:"numeric",
+    hour:"numeric",
+    minute:"2-digit",
+    second:"2-digit",
+    timeZoneName:"short",
+  });
+}
+function deriveRealtimeState(payload){
+  const scores = Array.isArray(payload?.scores) ? [...payload.scores] : [];
+  if(!scores.length) return null;
+  scores.sort((a,b)=>new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
+  const latest = scores[0];
+  const period = String(latest?.period || "").toUpperCase();
+  let matchState = "Upcoming";
+  let clock = "";
+  if(period === "FT"){
+    matchState = "Final";
+    clock = "FT";
+  }else if(period === "HT"){
+    matchState = "Halftime";
+    clock = "HT";
+  }else if(period === "ET"){
+    matchState = "Extra Time";
+    clock = "ET";
+  }else if(period){
+    matchState = "Live";
+    clock = period;
+  }
+  const timeline = scores.map((item, index)=>({
+    id:`${item.timestamp || "na"}-${item.period || "none"}-${index}`,
+    period:item.period || "PRE",
+    homeScore:clampScore(item.homeScore),
+    awayScore:clampScore(item.awayScore),
+    timestamp:item.timestamp || "",
+  }));
+  return {
+    homeScore:clampScore(latest.homeScore),
+    awayScore:clampScore(latest.awayScore),
+    matchState,
+    clock,
+    period:period || "PRE",
+    timestamp:latest.timestamp || "",
+    timeline,
+  };
+}
+function deriveMatchStateFromPeriod(rawPeriod){
+  const period = String(rawPeriod || "").toUpperCase();
+  if(period === "FT") return { matchState:"Final", clock:"FT", period:"FT" };
+  if(period === "HT") return { matchState:"Halftime", clock:"HT", period:"HT" };
+  if(period === "ET") return { matchState:"Extra Time", clock:"ET", period:"ET" };
+  if(period) return { matchState:"Live", clock:period, period };
+  return { matchState:"Upcoming", clock:"", period:"PRE" };
+}
+function buildReplayFrames(timeline, incrementMinutes){
+  if(!Array.isArray(timeline) || !timeline.length) return [];
+  const chronological = [...timeline]
+    .filter(item=>item?.timestamp)
+    .sort((a,b)=>new Date(a.timestamp || 0) - new Date(b.timestamp || 0));
+  if(!chronological.length) return [];
+  const stepMs = Math.max(1, Number(incrementMinutes) || 1) * 60 * 1000;
+  const startMs = new Date(chronological[0].timestamp).getTime();
+  const buckets = [];
+  chronological.forEach(item=>{
+    const itemMs = new Date(item.timestamp).getTime();
+    const bucketIndex = Math.max(0, Math.floor((itemMs - startMs) / stepMs));
+    const current = buckets[bucketIndex];
+    if(!current || itemMs >= new Date(current.timestamp).getTime()){
+      buckets[bucketIndex] = item;
+    }
+  });
+  const collapsed = buckets.filter(Boolean);
+  return collapsed.map((item, index)=>({
+    ...item,
+    frameIndex:index,
+    label:`+${index * Math.max(1, Number(incrementMinutes) || 1)}m`,
+    ...deriveMatchStateFromPeriod(item.period),
+  }));
+}
+function sxmImageUrl(path){
+  return path ? `${SXM_IMG}${path.replace(/^\/+/,"")}` : "";
+}
+function assetUrl(path){
+  if(!path) return "";
+  if(/^https?:\/\//i.test(path) || /^data:/i.test(path)) return path;
+  if(/^(aem|if)\//.test(path)) return sxmImageUrl(path);
+  return path;
+}
+
+// ─── Logo components ─────────────────────────────────────────────────────────
+function LeagueLogo({ dataset, size=28 }) {
+  if(!dataset?.leagueImage) return null;
+  return (
+    <img
+      src={assetUrl(dataset.leagueImage)}
+      alt={dataset.leagueName}
+      style={{width:size,height:size,objectFit:"contain",flexShrink:0,display:"block"}}
+    />
+  );
+}
+function LiveWaveIcon({ size=10, color="#4DA3FF", animated=false }){
+  return (
+    <span style={{position:"relative",width:size + 8,height:size,display:"inline-block",flexShrink:0}}>
+      <span style={{position:"absolute",left:0,top:"50%",width:2,height:2,borderRadius:"50%",
+        background:color,transform:"translateY(-50%)"}}/>
+      {[0,1,2].map(i=>(
+        <span key={i} style={{
+          position:"absolute",
+          left:2 + i*3,
+          top:"50%",
+          width:4 + i*2,
+          height:4 + i*2,
+          border:`1.5px solid ${color}`,
+          borderRadius:"50%",
+          borderColor:`transparent ${color} transparent transparent`,
+          transform:"translateY(-50%) rotate(45deg)",
+          opacity:0.9 - i*0.2,
+        }}/>
+      ))}
+    </span>
+  );
+}
+function EplLogo({ team, size=68 }) {
+  const [fail,setFail]=useState(false);
+  const fgc=fg(team.color);
+  if(!fail && team.logo) return (
+    <div style={{width:size,height:size,flexShrink:0,display:"grid",placeItems:"center"}}>
+      <img src={sxmImageUrl(team.logo)} alt={team.name} onError={()=>setFail(true)}
+        style={{width:size,height:size,objectFit:"contain",filter:"drop-shadow(0 2px 8px rgba(0,0,0,0.5))"}}/>
+    </div>
+  );
+  if(fail||!team.espnId) return (
+    <div style={{width:size,height:size,borderRadius:size*0.18,background:team.color,
+      border:"2px solid rgba(255,255,255,0.15)",display:"grid",placeItems:"center",flexShrink:0,
+      boxShadow:`0 0 22px ${team.color}55`}}>
+      <span style={{fontSize:size*0.27,fontWeight:900,letterSpacing:1,color:fgc}}>{team.abbr}</span>
+    </div>
+  );
+  return (
+    <div style={{width:size,height:size,flexShrink:0,display:"grid",placeItems:"center"}}>
+      <img src={`${ESPN}${team.espnId}.png`} alt={team.name} onError={()=>setFail(true)}
+        style={{width:size,height:size,objectFit:"contain",filter:"drop-shadow(0 2px 8px rgba(0,0,0,0.5))"}}/>
+    </div>
+  );
+}
+function WorldCupLogo({ team, size=68 }) {
+  const [fail,setFail]=useState(false);
+  if(team.logo && !fail) return (
+    <img src={sxmImageUrl(team.logo)} alt={team.name} onError={()=>setFail(true)}
+      style={{width:size,height:size,objectFit:"contain",flexShrink:0,display:"block"}}/>
+  );
+  return <img src={flagImageUrl(team.flag)} alt={team.name}
+    style={{width:size,height:size,objectFit:"contain",flexShrink:0,display:"block"}}/>;
+}
+function TeamLogoAny({ team, isWC, size=68 }) {
+  if(isWC) return <WorldCupLogo team={team} size={size}/>;
+  return <EplLogo team={team} size={size}/>;
+}
+
+// Tiny inline logo for mobile list rows
+function InlineLogo({ team, isWC, size=24 }) {
+  const [fail,setFail]=useState(false);
+  const fgc=fg(team.color);
+  if(isWC){
+    if(team.logo && !fail) return (
+      <img src={sxmImageUrl(team.logo)} alt={team.name} onError={()=>setFail(true)}
+        style={{width:size,height:size,objectFit:"contain",flexShrink:0,display:"block"}}/>
+    );
+    return <img src={flagImageUrl(team.flag)} alt={team.name}
+      style={{width:size,height:size,objectFit:"contain",flexShrink:0,display:"block"}}/>;
+  }
+  if(team.logo && !fail) return (
+    <img src={sxmImageUrl(team.logo)} alt={team.name} onError={()=>setFail(true)}
+      style={{width:size,height:size,objectFit:"contain",flexShrink:0}}/>
+  );
+  if(fail||!team.espnId) return (
+    <div style={{width:size,height:size,borderRadius:4,background:team.color,
+      display:"grid",placeItems:"center",flexShrink:0}}>
+      <span style={{fontSize:size*0.3,fontWeight:700,color:fgc}}>{team.abbr.slice(0,2)}</span>
+    </div>
+  );
+  return <img src={`${ESPN}${team.espnId}.png`} alt={team.name} onError={()=>setFail(true)}
+    style={{width:size,height:size,objectFit:"contain",flexShrink:0}}/>;
+}
+
+// ─── State pill ──────────────────────────────────────────────────────────────
+const SM={
+  Live:        {bg:"rgba(239,68,68,0.2)",   border:"rgba(239,68,68,0.55)",   dot:"#ef4444"},
+  Upcoming:    {bg:"rgba(99,102,241,0.18)", border:"rgba(99,102,241,0.5)",   dot:"#818cf8"},
+  Halftime:    {bg:"rgba(234,179,8,0.18)",  border:"rgba(234,179,8,0.5)",    dot:"#eab308"},
+  "Extra Time":{bg:"rgba(234,179,8,0.18)",  border:"rgba(234,179,8,0.5)",    dot:"#eab308"},
+  "Full Time": {bg:"rgba(34,197,94,0.18)",  border:"rgba(34,197,94,0.5)",    dot:"#22c55e"},
+  Final:       {bg:"rgba(148,163,184,0.18)",border:"rgba(148,163,184,0.4)", dot:"#94a3b8"},
+};
+function StatePill({state}){
+  const m=SM[state]||SM.Upcoming;
+  return (
+    <span style={{display:"inline-flex",alignItems:"center",gap:5,padding:"5px 11px",
+      borderRadius:999,background:m.bg,border:`1px solid ${m.border}`,
+      fontSize:10,fontWeight:800,letterSpacing:"0.08em",textTransform:"uppercase",color:"#fff"}}>
+      {state==="Live"&&<span style={{width:6,height:6,borderRadius:"50%",background:m.dot,
+        boxShadow:`0 0 6px ${m.dot}`,flexShrink:0,animation:"pulse 1.4s infinite"}}/>}
+      {state}
+    </span>
+  );
+}
+
+function AnimatedScore({ value, visible=true, style={}, accent="rgba(77,163,255,0.75)", hiddenValue="" }){
+  const [isAnimating,setIsAnimating] = useState(false);
+  const prevValueRef = useRef(value);
+
+  useEffect(()=>{
+    if(!visible){
+      prevValueRef.current = value;
+      setIsAnimating(false);
+      return;
+    }
+    if(prevValueRef.current === value) return;
+    prevValueRef.current = value;
+    setIsAnimating(true);
+    const timer = window.setTimeout(()=>setIsAnimating(false), 680);
+    return ()=>window.clearTimeout(timer);
+  }, [value, visible]);
+
+  return (
+    <span style={{
+      ...style,
+      display:"inline-block",
+      transformOrigin:"50% 60%",
+      animation:isAnimating ? "scorePulse 680ms cubic-bezier(0.2,0.8,0.2,1)" : "none",
+      textShadow:isAnimating ? `0 0 18px ${accent}, 0 0 34px ${accent}` : style.textShadow,
+      willChange:"transform, filter, opacity",
+    }}>
+      {visible ? value : hiddenValue}
+    </span>
+  );
+}
+
+function createCrowdCheer(audioContext){
+  const duration = 1.9;
+  const master = audioContext.createGain();
+  master.gain.setValueAtTime(0.0001, audioContext.currentTime);
+  master.gain.exponentialRampToValueAtTime(0.2, audioContext.currentTime + 0.18);
+  master.gain.exponentialRampToValueAtTime(0.05, audioContext.currentTime + duration);
+  master.connect(audioContext.destination);
+
+  const frameCount = Math.max(1, Math.floor(audioContext.sampleRate * duration));
+  const noiseBuffer = audioContext.createBuffer(1, frameCount, audioContext.sampleRate);
+  const data = noiseBuffer.getChannelData(0);
+  for(let i=0;i<frameCount;i+=1){
+    data[i] = (Math.random() * 2 - 1) * 0.85;
+  }
+
+  const noiseSource = audioContext.createBufferSource();
+  noiseSource.buffer = noiseBuffer;
+  const noiseFilter = audioContext.createBiquadFilter();
+  noiseFilter.type = "bandpass";
+  noiseFilter.frequency.setValueAtTime(620, audioContext.currentTime);
+  noiseFilter.Q.setValueAtTime(0.8, audioContext.currentTime);
+  noiseSource.connect(noiseFilter);
+  noiseFilter.connect(master);
+  noiseSource.start();
+  noiseSource.stop(audioContext.currentTime + duration);
+
+  const swell = audioContext.createOscillator();
+  const swellGain = audioContext.createGain();
+  swell.type = "triangle";
+  swell.frequency.setValueAtTime(180, audioContext.currentTime);
+  swell.frequency.exponentialRampToValueAtTime(260, audioContext.currentTime + 0.45);
+  swell.frequency.exponentialRampToValueAtTime(140, audioContext.currentTime + duration);
+  swellGain.gain.setValueAtTime(0.0001, audioContext.currentTime);
+  swellGain.gain.exponentialRampToValueAtTime(0.045, audioContext.currentTime + 0.2);
+  swellGain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + duration);
+  swell.connect(swellGain);
+  swellGain.connect(master);
+  swell.start();
+  swell.stop(audioContext.currentTime + duration);
+}
+
+// ─── Score Card ──────────────────────────────────────────────────────────────
+function ScoreCard({home,away,homeScore,awayScore,state,clock,league,isWC,leagueColor}){
+  const show=state!=="Upcoming";
+  const rightHeader = state==="Final" ? "FINAL" : state==="Full Time" ? "FT" : state==="Halftime" ? "HT" : state==="Extra Time" ? "ET" : "";
+  const badgeFg = fg(leagueColor || "#111111");
+  return (
+    <div style={{borderRadius:26,border:"1px solid rgba(255,255,255,0.13)",
+      background:"linear-gradient(160deg,rgba(255,255,255,0.1) 0%,rgba(255,255,255,0.04) 100%)",
+      backdropFilter:"blur(18px)",padding:"42px 46px",width:"100%",maxWidth:520,
+      boxShadow:"0 24px 60px rgba(0,0,0,0.45)"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+        <span style={{fontSize:10,fontWeight:800,letterSpacing:"0.08em",textTransform:"uppercase",
+          color:badgeFg,background:`${leagueColor}CC`,
+          borderRadius:8,padding:"5px 10px",border:`1px solid ${leagueColor}`}}>{league}</span>
+        {rightHeader ? (
+          <span style={{fontSize:12,fontWeight:800,letterSpacing:"0.08em",textTransform:"uppercase",
+            color:"#f8fafc"}}>
+            {rightHeader}
+          </span>
+        ) : null}
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:8}}>
+        <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"flex-start",gap:8}}>
+          <TeamLogoAny team={home} isWC={isWC} size={68}/>
+          <div>
+            <div style={{fontSize:24,fontWeight:900,letterSpacing:"-0.02em",color:"#f1f5f9"}}>{home.abbr}</div>
+            <div style={{fontSize:12,color:"rgba(255,255,255,0.5)",marginTop:2}}>{home.name}</div>
+          </div>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6,flexShrink:0,minWidth:120}}>
+          <div style={{display:"flex",alignItems:"center",gap:80}}>
+            <AnimatedScore value={homeScore} visible={show} accent="rgba(125,211,252,0.9)"
+              style={{fontSize:56,fontWeight:900,letterSpacing:"-0.04em",color:"#f8fafc",lineHeight:1,minWidth:28,textAlign:"center"}}/>
+            <AnimatedScore value={awayScore} visible={show} accent="rgba(125,211,252,0.9)"
+              style={{fontSize:56,fontWeight:900,letterSpacing:"-0.04em",color:"#f8fafc",lineHeight:1,minWidth:28,textAlign:"center"}}/>
+          </div>
+          {state==="Live" && clock ? (
+            <span style={{fontSize:14,fontWeight:800,color:"rgba(255,255,255,0.7)",letterSpacing:"0.04em",textTransform:"uppercase",textAlign:"center"}}>
+              {clock}
+            </span>
+          ) : null}
+        </div>
+        <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"flex-end",gap:8}}>
+          <TeamLogoAny team={away} isWC={isWC} size={68}/>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:24,fontWeight:900,letterSpacing:"-0.02em",color:"#f1f5f9"}}>{away.abbr}</div>
+            <div style={{fontSize:12,color:"rgba(255,255,255,0.5)",marginTop:2}}>{away.name}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Color Split ─────────────────────────────────────────────────────────────
+function ColorSplitPreview({teamA,teamB,isWC}){
+  const fgA=fg(teamA.color),fgB=fg(teamB.color);
+  return (
+    <div style={{position:"relative",height:180,borderRadius:18,overflow:"hidden",
+      border:"1px solid rgba(255,255,255,0.1)",boxShadow:"0 12px 40px rgba(0,0,0,0.4)"}}>
+      <div style={{position:"absolute",inset:0,background:teamA.color,
+        clipPath:"polygon(0 0,37.4% 0,62.6% 100%,0 100%)"}}>
+        <div style={{position:"absolute",left:18,top:"50%",transform:"translateY(-50%)",
+          display:"flex",flexDirection:"column",alignItems:"flex-start",gap:6}}>
+          {isWC?<img src={flagImageUrl(teamA.flag)} alt={teamA.name} style={{width:40,height:40,objectFit:"contain",display:"block"}}/>
+            :<EplLogo team={teamA} size={46}/>}
+          <span style={{fontSize:20,fontWeight:900,color:fgA}}>{teamA.abbr}</span>
+          <span style={{fontSize:10,color:fgA,opacity:0.55,fontFamily:"monospace"}}>{teamA.color}</span>
+        </div>
+      </div>
+      <div style={{position:"absolute",inset:0,background:teamB.color,
+        clipPath:"polygon(37.4% 0,100% 0,100% 100%,62.6% 100%)"}}>
+        <div style={{position:"absolute",right:18,top:"50%",transform:"translateY(-50%)",
+          display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6}}>
+          {isWC?<img src={flagImageUrl(teamB.flag)} alt={teamB.name} style={{width:40,height:40,objectFit:"contain",display:"block"}}/>
+            :<EplLogo team={teamB} size={46}/>}
+          <span style={{fontSize:20,fontWeight:900,color:fgB}}>{teamB.abbr}</span>
+          <span style={{fontSize:10,color:fgB,opacity:0.55,fontFamily:"monospace"}}>{teamB.color}</span>
+        </div>
+      </div>
+      <div style={{position:"absolute",inset:0,display:"flex",justifyContent:"center",
+        alignItems:"center",pointerEvents:"none"}}>
+        <span style={{fontSize:9,fontWeight:800,letterSpacing:"0.12em",textTransform:"uppercase",
+          color:"rgba(255,255,255,0.4)",background:"rgba(0,0,0,0.35)",backdropFilter:"blur(4px)",
+          padding:"3px 8px",borderRadius:6}}>35° Split</span>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ─── MOBILE PHONE FRAME wrapper ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+function PhoneFrame({children, label}){
+  return (
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10,width:390}}>
+      <div style={{fontSize:10,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",
+        color:"#64748b"}}>{label}</div>
+      {/* Outer shell */}
+      <div style={{
+        width:"100%", background:"#0a0a0a",
+        borderRadius:44, padding:"10px 8px",
+        boxShadow:"0 0 0 1.5px #2a2a2a, 0 0 0 3px #1a1a1a, 0 32px 64px rgba(0,0,0,0.8), inset 0 0 0 1px rgba(255,255,255,0.06)",
+        position:"relative",
+      }}>
+        {/* Side buttons */}
+        <div style={{position:"absolute",left:-3,top:84,width:3,height:32,background:"#1e1e1e",borderRadius:"3px 0 0 3px"}}/>
+        <div style={{position:"absolute",left:-3,top:128,width:3,height:56,background:"#1e1e1e",borderRadius:"3px 0 0 3px"}}/>
+        <div style={{position:"absolute",left:-3,top:196,width:3,height:56,background:"#1e1e1e",borderRadius:"3px 0 0 3px"}}/>
+        <div style={{position:"absolute",right:-3,top:124,width:3,height:72,background:"#1e1e1e",borderRadius:"0 3px 3px 0"}}/>
+        {/* Screen */}
+        <div style={{
+          borderRadius:36, overflow:"hidden",
+          background:"#111114",
+          position:"relative",
+          minHeight:690,
+        }}>
+          {/* Status bar */}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+            padding:"14px 24px 6px",background:"#161a1c"}}>
+            <span style={{fontSize:12,fontWeight:700,color:"#fff",letterSpacing:"0.01em"}}>9:41</span>
+            <div style={{display:"flex",gap:5,alignItems:"center"}}>
+              <svg width="16" height="12" viewBox="0 0 16 12" fill="white" opacity="0.9">
+                <rect x="0" y="4" width="3" height="8" rx="1"/><rect x="4.5" y="2.5" width="3" height="9.5" rx="1"/>
+                <rect x="9" y="1" width="3" height="11" rx="1"/><rect x="13.5" y="0" width="2.5" height="12" rx="1"/>
+              </svg>
+              <svg width="15" height="12" viewBox="0 0 15 12" fill="white" opacity="0.9">
+                <path d="M7.5 2.5C9.8 2.5 11.8 3.5 13.2 5L14.5 3.7C12.7 1.9 10.2 0.8 7.5 0.8C4.8 0.8 2.3 1.9 0.5 3.7L1.8 5C3.2 3.5 5.2 2.5 7.5 2.5Z" />
+                <path d="M7.5 5.5C9 5.5 10.4 6.1 11.4 7.1L12.7 5.8C11.3 4.4 9.5 3.5 7.5 3.5C5.5 3.5 3.7 4.4 2.3 5.8L3.6 7.1C4.6 6.1 6 5.5 7.5 5.5Z"/>
+                <circle cx="7.5" cy="10" r="1.8"/>
+              </svg>
+              <div style={{display:"flex",alignItems:"center",gap:2}}>
+                <div style={{width:22,height:11,borderRadius:3,border:"1.5px solid rgba(255,255,255,0.6)",
+                  padding:"1.5px",display:"flex",alignItems:"center"}}>
+                  <div style={{width:"75%",height:"100%",background:"white",borderRadius:1.5}}/>
+                </div>
+              </div>
+            </div>
+          </div>
+          {/* Dynamic island */}
+          <div style={{display:"flex",justifyContent:"center",marginBottom:0,background:"#161a1c"}}>
+            <div style={{width:100,height:28,background:"#000",borderRadius:14}}/>
+          </div>
+          {/* Content */}
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ─── FIGMA-ALIGNED LIVE SCORE CARD ───────────────────────────────────────────
+// Matches: bg #1b2227, rounding 8px, LIVE badge + league + clock/period,
+//          team rows: logo(24px) + abbr(14px medium) + score(14px medium)
+// ══════════════════════════════════════════════════════════════════════════════
+function LiveScoreCard({ teamA, teamB, scoreA, scoreB, stateStr, clockStr, league, isWC, isMain, leagueColor }) {
+  const isLive    = stateStr === "LIVE";
+  const isUpcoming = stateStr === "TODAY" || stateStr === "UPCOMING";
+  const isFinal   = stateStr === "FINAL";
+  const isHT      = stateStr === "HT";
+  const isET      = stateStr === "ET";
+  const showScore = !isUpcoming;
+
+  // Period / status label shown top-right
+  let periodLabel;
+  if (isLive)     periodLabel = clockStr || "LIVE";
+  else if (isHT)  periodLabel = "HT";
+  else if (isET)  periodLabel = "ET";
+  else if (isFinal) periodLabel = "FINAL";
+  else if (isUpcoming) periodLabel = clockStr || "7:00PM";
+  else             periodLabel = "";
+
+  return (
+    <div style={{
+      background: "#1d2329",
+      borderRadius: 8,
+      padding: "10px 10px 8px",
+      display: "flex",
+      flexDirection: "column",
+      gap: 9,
+      border: isMain ? "1px solid rgba(255,255,255,0.06)" : "1px solid transparent",
+      position: "relative",
+      overflow: "hidden",
+    }}>
+      {/* Header row: league left | status/clock right */}
+      <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", height:14}}>
+        <div style={{display:"flex", alignItems:"center", gap:4}}>
+          {/* Live badge */}
+          {isLive && (
+            <div style={{display:"flex", alignItems:"center", gap:3,
+              fontSize:9, fontWeight:700, color:"#f3f5f7",
+              letterSpacing:"0.02em", textTransform:"uppercase",
+              fontFamily:"'Helvetica Now Text', 'Helvetica Neue', Helvetica, sans-serif",
+              lineHeight:1,
+            }}>
+              <span>LIVE </span>
+              <span style={{width:6,height:6,borderRadius:"50%",background:"#4DA3FF",
+                display:"inline-block",flexShrink:0}}/>
+            </div>
+          )}
+          {/* League */}
+          <span style={{fontSize:10,fontWeight:700,color:"rgba(255,255,255,0.32)",textTransform:"uppercase",
+            fontFamily:"'Helvetica Now Text','Helvetica Neue',Helvetica,sans-serif",lineHeight:1}}>
+            {league}
+          </span>
+        </div>
+        {/* Period / clock right-aligned */}
+        {periodLabel && (
+          <span style={{fontSize:10,fontWeight:700,color:"rgba(255,255,255,0.56)",textTransform:"uppercase",
+            fontFamily:"'Helvetica Now Text','Helvetica Neue',Helvetica,sans-serif",lineHeight:1}}>
+            {periodLabel}
+          </span>
+        )}
+      </div>
+
+      {/* Team A row */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{width:24,height:24,flexShrink:0,display:"grid",placeItems:"center"}}>
+            <InlineLogo team={teamA} isWC={isWC} size={24}/>
+          </div>
+          <span style={{
+            fontSize:15, fontWeight:700, color:"#cfd6dd",
+            fontFamily:"'Helvetica Now Text','Helvetica Neue',Helvetica,sans-serif",
+            lineHeight:1.25, whiteSpace:"nowrap",
+          }}>{teamA.abbr}</span>
+        </div>
+        <span style={{
+          fontSize:15, fontWeight:700, color:"#fff",
+          fontFamily:"'Helvetica Now Text','Helvetica Neue',Helvetica,sans-serif",
+          lineHeight:1.25,
+        }}><AnimatedScore value={scoreA} visible={showScore} accent="rgba(77,163,255,0.85)"
+          style={{fontSize:15, fontWeight:700, color:"#fff",
+            fontFamily:"'Helvetica Now Text','Helvetica Neue',Helvetica,sans-serif",
+            lineHeight:1.25}}/></span>
+      </div>
+
+      {/* Team B row */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{width:24,height:24,flexShrink:0,display:"grid",placeItems:"center"}}>
+            <InlineLogo team={teamB} isWC={isWC} size={24}/>
+          </div>
+          <span style={{
+            fontSize:15, fontWeight:700, color:"#cfd6dd",
+            fontFamily:"'Helvetica Now Text','Helvetica Neue',Helvetica,sans-serif",
+            lineHeight:1.25, whiteSpace:"nowrap",
+          }}>{teamB.abbr}</span>
+        </div>
+        <span style={{
+          fontSize:15, fontWeight:700, color:"#fff",
+          fontFamily:"'Helvetica Now Text','Helvetica Neue',Helvetica,sans-serif",
+          lineHeight:1.25,
+        }}><AnimatedScore value={scoreB} visible={showScore} accent="rgba(77,163,255,0.85)"
+          style={{fontSize:15, fontWeight:700, color:"#fff",
+            fontFamily:"'Helvetica Now Text','Helvetica Neue',Helvetica,sans-serif",
+            lineHeight:1.25}}/></span>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ─── MOBILE VIEW 1: Today's Games list — Figma-aligned ───────────────────────
+// App Bar: #161a1c surface, back chevron, "Today's games" 24px title,
+//          filter pill row (All selected = white, others = #101315)
+// Grid: 2-col LiveScoreCard components
+// ══════════════════════════════════════════════════════════════════════════════
+function MobileListView({teams, homeIdx, awayIdx, homeScore, awayScore, matchState, clock, league, isWC, dateLabel, leagueColor}){
+  const home = teams[homeIdx]||teams[0];
+  const away = teams[awayIdx]||teams[1];
+
+  // Build filler matchups
+  const others = teams.filter((_,i)=>i!==homeIdx&&i!==awayIdx);
+  const fillerPairs = [];
+  for(let i=0;i<others.length-1&&fillerPairs.length<9;i+=2){
+    fillerPairs.push([others[i],others[i+1]]);
+  }
+
+  const scheduledTime = (dateLabel || "").split("·").pop().trim();
+  const stateStr = matchState==="Full Time"||matchState==="Final" ? "FINAL"
+    : matchState==="Live" ? "LIVE"
+    : matchState==="Halftime" ? "HT"
+    : matchState==="Extra Time" ? "ET"
+    : "TODAY";
+
+  const clockStr = matchState==="Live" ? (clock || "") : stateStr==="TODAY" ? scheduledTime : "";
+
+  const fillerData = [
+    {stateStr:"FINAL", scoreA:2, scoreB:1, clockStr:"6:35PM"},
+    {stateStr:"FINAL", scoreA:3, scoreB:0, clockStr:"6:40PM"},
+    {stateStr:"LIVE",  scoreA:1, scoreB:1, clockStr:"67'"},
+    {stateStr:"FINAL", scoreA:4, scoreB:2, clockStr:"6:40PM"},
+    {stateStr:"TODAY", scoreA:0, scoreB:0, clockStr:"7:00PM"},
+    {stateStr:"LIVE",  scoreA:0, scoreB:2, clockStr:"54'"},
+    {stateStr:"TODAY", scoreA:0, scoreB:0, clockStr:"7:00PM"},
+    {stateStr:"FINAL", scoreA:1, scoreB:3, clockStr:"7:05PM"},
+    {stateStr:"TODAY", scoreA:0, scoreB:0, clockStr:"7:30PM"},
+  ];
+
+  // Filter pill labels — adapt to league context
+  const filterLabels = isWC
+    ? ["All", "FIFA World Cup 2026", "Group", "Knockout", "Live"]
+    : ["All", "EPL", "Featured", "Live", "Final"];
+  const selectedFilter = isWC ? "FIFA World Cup 2026" : "EPL";
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",background:"#171b1f",height:596,overflow:"hidden"}}>
+      {/* ── App Bar ── */}
+      <div style={{background:"#171b1f",flexShrink:0}}>
+        {/* Primary bar: back chevron */}
+        <div style={{
+          height:52,
+          display:"flex",
+          alignItems:"center",
+          paddingLeft:18,
+          paddingRight:24,
+        }}>
+          <div style={{
+            width:20, height:20,
+            display:"flex", alignItems:"center", justifyContent:"center",
+            flexShrink:0, cursor:"pointer",
+          }}>
+            {/* Chevron left */}
+            <svg width="11" height="18" viewBox="0 0 11 18" fill="none">
+              <path d="M9.5 1L1.5 9L9.5 17" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </div>
+        </div>
+
+        {/* Secondary bar: title */}
+        <div style={{
+          paddingLeft:20, paddingRight:20,
+          paddingBottom:12,
+        }}>
+          <span style={{
+            fontSize:21, fontWeight:700, color:"#ffffff",
+            fontFamily:"'Helvetica Now Text','Helvetica Neue',Helvetica,sans-serif",
+            lineHeight:1.2, letterSpacing:"-0.02em",
+          }}>Today's games</span>
+        </div>
+
+        {/* Tertiary bar: filter pills */}
+        <div style={{
+          height:40,
+          display:"flex",
+          alignItems:"center",
+          overflowX:"auto",
+          paddingLeft:20,
+          paddingBottom:0,
+          gap:10,
+        }}>
+          {filterLabels.map((label, i) => {
+            const isSelected = label === selectedFilter;
+            return (
+              <div
+                key={label}
+                style={{
+                  minWidth:48,
+                  height:28,
+                  borderRadius:999,
+                  paddingLeft:14,
+                  paddingRight:14,
+                  display:"flex",
+                  alignItems:"center",
+                  justifyContent:"center",
+                  flexShrink:0,
+                  cursor:"pointer",
+                  background: isSelected ? "#f3f5f7" : "#101315",
+                  border: "none",
+                }}
+              >
+                <span style={{
+                  fontSize:11, fontWeight:700,
+                  color: isSelected ? "#101315" : "#f3f5f7",
+                  fontFamily:"'Helvetica Now Text','Helvetica Neue',Helvetica,sans-serif",
+                  lineHeight:1.25,
+                  whiteSpace:"nowrap",
+                }}>
+                  {label}
+                </span>
+              </div>
+            );
+          })}
+          {/* Extra right padding spacer */}
+          <div style={{width:8, flexShrink:0}}/>
+        </div>
+
+        {/* 8px spacer */}
+        <div style={{height:8}}/>
+      </div>
+
+      {/* ── Game Cards Grid ── */}
+      <div style={{
+        flex:1,
+        overflowY:"auto",
+        padding:"18px 20px 0",
+        background:"#171b1f",
+      }}>
+        <div style={{
+          display:"grid",
+          gridTemplateColumns:"1fr 1fr",
+          gap:10,
+          paddingBottom:120,
+        }}>
+          {/* Featured / main matchup first */}
+          <LiveScoreCard
+            teamA={home} teamB={away}
+            scoreA={homeScore} scoreB={awayScore}
+            stateStr={stateStr} clockStr={clockStr}
+            league={league} isWC={isWC} isMain={true} leagueColor={leagueColor}
+          />
+          {/* Filler cards */}
+          {fillerPairs.map(([a,b], i) => (
+            <LiveScoreCard
+              key={i}
+              teamA={a} teamB={b}
+              scoreA={fillerData[i]?.scoreA ?? 0}
+              scoreB={fillerData[i]?.scoreB ?? 0}
+              stateStr={fillerData[i]?.stateStr ?? "FINAL"}
+              clockStr={fillerData[i]?.clockStr ?? ""}
+              league={league} isWC={isWC} isMain={false} leagueColor={leagueColor}
+            />
+          ))}
+        </div>
+      </div>
+      <div style={{position:"absolute"}}/>
+      <div style={{marginTop:"auto",flexShrink:0,background:"#171b1f"}}>
+        <div style={{margin:"0 0 0",padding:"0 14px 10px"}}>
+          <div style={{height:58,borderRadius:8,background:"#1d2329",display:"flex",alignItems:"center",gap:10,padding:"0 10px",
+            borderTop:"1px solid rgba(255,255,255,0.03)"}}>
+            <div style={{width:42,height:42,borderRadius:4,overflow:"hidden",flexShrink:0}}>
+              <img src="Conan.jpeg" alt="Grant's AirPods Pro" style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>
+            </div>
+            <div style={{minWidth:0,flex:1}}>
+              <div style={{fontSize:11,fontWeight:700,color:"rgba(255,255,255,0.82)",lineHeight:1.15,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                Filet - Rules w/ Rinny - Steve Rintoul
+              </div>
+              <div style={{fontSize:10,fontWeight:700,color:"#4d8dff",lineHeight:1.2,marginTop:4}}>
+                Grant's AirPods Pro
+              </div>
+            </div>
+            <div style={{fontSize:16,color:"#4d8dff",lineHeight:1}}>◰</div>
+            <div style={{width:24,height:24,borderRadius:"50%",display:"grid",placeItems:"center",color:"#fff",fontSize:12,lineHeight:1}}>▶</div>
+          </div>
+          <div style={{height:3,background:"#2563eb",borderRadius:999,marginTop:1}}/>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",padding:"10px 28px 14px",borderTop:"1px solid rgba(255,255,255,0.02)"}}>
+          {["Discover","Channels","Search","Library"].map((item,i)=>(
+            <div key={item} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:5,color:i===0?"#fff":"rgba(255,255,255,0.42)"}}>
+              <div style={{fontSize:20,lineHeight:1}}>{["♞","◉","⌕","▯"][i]}</div>
+              <div style={{fontSize:10,fontWeight:700}}>{item}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ─── MOBILE VIEW 2: Single game detail ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+function MobileDetailView({home, away, homeScore, awayScore, matchState, clock, league, isWC, dateLabel, venue, coverageLabel, leagueColor}){
+  const show = matchState!=="Upcoming";
+  const isLive = matchState==="Live"||matchState==="Halftime"||matchState==="Extra Time";
+  const periodLabel = matchState==="Live" ? (clock||"2H")
+    : matchState==="Halftime" ? "HT"
+    : matchState==="Extra Time" ? "ET"
+    : matchState==="Full Time"||matchState==="Final" ? "FT"
+    : matchState==="Upcoming" ? "VS" : clock||"";
+
+  return (
+    <div style={{overflowY:"auto",maxHeight:596}}>
+      <div style={{position:"relative",height:180,overflow:"hidden",flexShrink:0}}>
+        <div style={{position:"absolute",inset:0,background:home.color,
+          clipPath:"polygon(0 0,58% 0,43% 100%,0 100%)"}}/>
+        <div style={{position:"absolute",inset:0,background:away.color,
+          clipPath:"polygon(58% 0,100% 0,100% 100%,43% 100%)"}}/>
+        <div style={{position:"absolute",left:"50%",top:-12,bottom:-12,width:2,
+          background:"rgba(255,255,255,0.42)",transform:"translateX(-50%) rotate(14deg)",
+          transformOrigin:"center"}}/>
+        <div style={{position:"absolute",inset:0,
+          background:"linear-gradient(to bottom,rgba(0,0,0,0.1) 0%,rgba(0,0,0,0.35) 100%)",
+          pointerEvents:"none"}}/>
+        <div style={{position:"absolute",top:10,left:12,right:12,display:"flex",justifyContent:"space-between",zIndex:10}}>
+          <div style={{width:28,height:28,borderRadius:"50%",background:"rgba(0,0,0,0.45)",
+            display:"grid",placeItems:"center"}}>
+            <span style={{fontSize:13,color:"#fff",lineHeight:1}}>←</span>
+          </div>
+          <div style={{width:28,height:28,borderRadius:"50%",background:"rgba(0,0,0,0.45)",
+            display:"grid",placeItems:"center"}}>
+            <span style={{fontSize:16,color:"#fff",lineHeight:1}}>···</span>
+          </div>
+        </div>
+        <div style={{position:"absolute",left:"18%",top:"50%",transform:"translate(-50%,-50%)",zIndex:5}}>
+          <TeamLogoAny team={home} isWC={isWC} size={72}/>
+        </div>
+        <div style={{position:"absolute",left:"82%",top:"50%",transform:"translate(-50%,-50%)",zIndex:5}}>
+          <TeamLogoAny team={away} isWC={isWC} size={72}/>
+        </div>
+      </div>
+      <div style={{background:"#111114",padding:"14px 14px 16px",display:"flex",flexDirection:"column",gap:12}}>
+        <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",alignItems:"center",columnGap:10}}>
+          <div style={{fontSize:14,fontWeight:800,color:"#fff",letterSpacing:"0.01em",lineHeight:1.15,textTransform:"uppercase"}}>
+            {home.name}
+          </div>
+          <div style={{fontSize:13,color:"rgba(255,255,255,0.58)",fontWeight:700,textTransform:"lowercase"}}>
+            vs
+          </div>
+          <div style={{fontSize:14,fontWeight:800,color:"#fff",letterSpacing:"0.01em",lineHeight:1.15,textTransform:"uppercase",textAlign:"right"}}>
+            {away.name}
+          </div>
+        </div>
+        <div style={{borderRadius:10,overflow:"hidden",background:"rgba(255,255,255,0.06)",
+          border:"1px solid rgba(255,255,255,0.08)"}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",
+            borderBottom:"3px solid transparent",
+            borderImage:`linear-gradient(90deg, ${home.color} 0%, ${home.color} 50%, ${away.color} 50%, ${away.color} 100%) 1`}}>
+            {[home,away].map((t,i)=>(
+              <div key={i} style={{padding:"7px 0",textAlign:"center",fontSize:11,fontWeight:800,
+                letterSpacing:"0.06em",color:"rgba(255,255,255,0.8)"}}>{t.abbr}</div>
+            ))}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",alignItems:"center",padding:"12px 16px",columnGap:14}}>
+            <AnimatedScore value={homeScore} visible={show} hiddenValue="—" accent="rgba(96,165,250,0.85)"
+              style={{fontSize:44,fontWeight:900,letterSpacing:"-0.04em",color:"#fff",lineHeight:1,textAlign:"center"}}/>
+            <span style={{fontSize:12,fontWeight:700,color:"rgba(255,255,255,0.45)",letterSpacing:"0.03em"}}>{periodLabel}</span>
+            <AnimatedScore value={awayScore} visible={show} hiddenValue="—" accent="rgba(96,165,250,0.85)"
+              style={{fontSize:44,fontWeight:900,letterSpacing:"-0.04em",color:"#fff",lineHeight:1,textAlign:"center"}}/>
+          </div>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:10,fontWeight:800,letterSpacing:"0.08em",textTransform:"uppercase",
+            color:"#fff"}}>
+            {league}
+          </span>
+          {isLive&&(
+            <span style={{background:"#111",border:"1px solid rgba(255,255,255,0.25)",
+              borderRadius:6,padding:"3px 7px",fontSize:10,fontWeight:800,color:"#fff",
+              display:"inline-flex",alignItems:"center",gap:4}}>
+              <span style={{width:6,height:6,borderRadius:"50%",background:"#4DA3FF",
+                display:"inline-block",flexShrink:0}}/>
+              LIVE
+            </span>
+          )}
+          <span style={{fontSize:11,color:"rgba(255,255,255,0.4)",fontWeight:500}}>
+            {dateLabel} · {clock||"TBD"}
+          </span>
+        </div>
+        <div style={{borderRadius:10,background:"rgba(255,255,255,0.04)",
+          border:"1px solid rgba(255,255,255,0.06)",padding:"10px 12px"}}>
+          <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.08em",textTransform:"uppercase",
+            color:"rgba(255,255,255,0.38)",marginBottom:4}}>Venue</div>
+          <div style={{fontSize:11,fontWeight:700,color:"rgba(255,255,255,0.84)",lineHeight:1.25}}>{venue}</div>
+        </div>
+        <div style={{borderTop:"1px solid rgba(255,255,255,0.06)",paddingTop:10}}>
+          <div style={{fontSize:14,fontWeight:900,color:"#fff",marginBottom:8}}>Ways to listen</div>
+          {["National","Away","Home"].map((label,i)=>(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+              <div style={{width:36,height:36,borderRadius:8,flexShrink:0,
+                background: i===0?"#1a1a2e":i===1?home.color:away.color,
+                display:"grid",placeItems:"center",border:"1px solid rgba(255,255,255,0.1)"}}>
+                {i===0
+                  ? <span style={{fontSize:8,fontWeight:900,color:"#fff"}}>ESPN</span>
+                  : isWC
+                    ? <InlineLogo team={i===1?home:away} isWC={isWC} size={24}/>
+                    : <EplLogo team={i===1?home:away} size={28}/>
+                }
+              </div>
+              <div style={{flex:1}}>
+                <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.07em",textTransform:"uppercase",
+                  color:"rgba(255,255,255,0.4)"}}>{label}</div>
+                <div style={{fontSize:11,fontWeight:700,color:"rgba(255,255,255,0.85)"}}>
+                  {i===0?coverageLabel:i===1?home.name:away.name}
+                </div>
+              </div>
+              <div style={{width:28,height:28,borderRadius:"50%",border:"1.5px solid rgba(255,255,255,0.25)",
+                display:"grid",placeItems:"center"}}>
+                <span style={{fontSize:10,color:"#fff"}}>▶</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Discover View ────────────────────────────────────────────────────────────
+function MobileDiscoverView({home, away, homeScore, awayScore, matchState, league, isWC, coverageLabel, leagueColor}){
+  const stateLabel = matchState==="Full Time"||matchState==="Final" ? "FINAL"
+    : matchState==="Live" ? "LIVE"
+    : matchState==="Halftime" ? "HALFTIME"
+    : matchState==="Extra Time" ? "EXTRA TIME"
+    : "UPCOMING";
+  const sportsTileBg = `linear-gradient(105deg, ${home.color} 0%, ${home.color} 47%, ${away.color} 53%, ${away.color} 100%)`;
+
+  return (
+    <div style={{height:596,display:"flex",flexDirection:"column",overflow:"hidden",background:"#101316",
+      fontFamily:"'Helvetica Now Text','Helvetica Neue',Helvetica,Arial,sans-serif"}}>
+      <div style={{flex:1,overflowY:"auto",padding:"12px 20px 16px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:26,
+          color:"#fff",fontSize:13,fontWeight:700}}>
+          <div>10:05</div>
+          <div style={{display:"flex",alignItems:"center",gap:7,fontSize:11,color:"rgba(255,255,255,0.92)"}}>
+            <span>▮▮▮</span>
+            <span>◜◝</span>
+            <span>▭</span>
+          </div>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+          <div style={{fontSize:23,fontWeight:900,color:"#fff",letterSpacing:"-0.04em"}}>SiriusXM</div>
+          <div style={{width:22,height:22,borderRadius:"50%",border:"2px solid rgba(255,255,255,0.9)",
+            display:"grid",placeItems:"center",color:"#fff",fontSize:11,lineHeight:1}}>⚙</div>
+        </div>
+        <div style={{display:"flex",gap:18,overflowX:"auto",paddingBottom:4,marginBottom:24}}>
+          {["For You","Music","Talk & Podcasts","Sports","Howard"].map((tab,i)=>(
+            <div key={tab} style={{fontSize:14,fontWeight:600,color:i===0?"#fff":"rgba(255,255,255,0.48)",
+              position:"relative",whiteSpace:"nowrap",paddingBottom:6}}>
+              {tab}
+              {i===0 && <div style={{position:"absolute",left:0,right:0,bottom:0,height:3,borderRadius:99,background:"#4da3ff"}}/>}
+            </div>
+          ))}
+        </div>
+        <div style={{fontSize:18,fontWeight:800,color:"#fff",lineHeight:1.18,marginBottom:14,letterSpacing:"-0.03em"}}>
+          Based on your morning listening
+        </div>
+        <div style={{display:"flex",gap:12,overflowX:"auto",paddingBottom:8,marginBottom:26}}>
+          <div style={{minWidth:152}}>
+            <div style={{width:152,height:152,borderRadius:22,overflow:"hidden",background:sportsTileBg,position:"relative",marginBottom:8}}>
+              <div style={{position:"absolute",left:"50%",top:-12,bottom:-12,width:1,
+                background:"rgba(255,255,255,0.78)",transform:"translateX(-50%) rotate(18deg)",
+                transformOrigin:"center",boxShadow:"0 0 0 1px rgba(255,255,255,0.14)"}}/>
+              <div style={{position:"absolute",left:"28%",top:"50%",transform:"translate(-50%,-50%)"}}>
+                <TeamLogoAny team={home} isWC={isWC} size={42}/>
+              </div>
+              <div style={{position:"absolute",left:"74%",top:"50%",transform:"translate(-50%,-50%)"}}>
+                <TeamLogoAny team={away} isWC={isWC} size={42}/>
+              </div>
+            </div>
+            <div style={{fontSize:12,fontWeight:800,color:"#fff",letterSpacing:"0.02em",marginBottom:4}}>{stateLabel}</div>
+            <div style={{fontSize:15,fontWeight:800,color:"#fff",lineHeight:1.1,letterSpacing:"-0.02em"}}>
+              {home.abbr} <AnimatedScore value={homeScore} visible={matchState!=="Upcoming"} hiddenValue="—" accent="rgba(96,165,250,0.85)"
+                style={{fontSize:15,fontWeight:800,color:"#fff",lineHeight:1.1,letterSpacing:"-0.02em"}}/> - {away.abbr} <AnimatedScore value={awayScore} visible={matchState!=="Upcoming"} accent="rgba(96,165,250,0.85)"
+                hiddenValue="—"
+                style={{fontSize:15,fontWeight:800,color:"#fff",lineHeight:1.1,letterSpacing:"-0.02em"}}/>
+            </div>
+            <div style={{fontSize:12,color:"rgba(255,255,255,0.78)",marginTop:4,lineHeight:1.2}}>
+              {home.name} vs {away.name}
+            </div>
+            <div style={{display:"inline-flex",marginTop:6,color:"#fff",
+              fontSize:10,fontWeight:800,letterSpacing:"0.08em",textTransform:"uppercase"}}>
+              {league}
+            </div>
+          </div>
+          <div style={{minWidth:152}}>
+            <div style={{width:152,height:152,borderRadius:22,overflow:"hidden",position:"relative",marginBottom:8,
+              background:"#1a1a1a"}}>
+              <img
+                src="Conan.jpeg"
+                alt="Conan O'Brien Needs a Friend"
+                style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}
+              />
+            </div>
+            <div style={{fontSize:15,fontWeight:700,color:"#fff",lineHeight:1.15,letterSpacing:"-0.02em"}}>
+              Conan O'Brien Needs
+              <br/>a Friend
+            </div>
+            <div style={{fontSize:12,color:"rgba(255,255,255,0.52)",marginTop:4,lineHeight:1.15}}>Talk &amp; Comedy</div>
+          </div>
+        </div>
+        <div style={{fontSize:18,fontWeight:800,color:"#fff",marginBottom:14,letterSpacing:"-0.03em"}}>
+          Today's main event
+        </div>
+        <div style={{borderRadius:26,overflow:"hidden",height:172,position:"relative",
+          background:"linear-gradient(135deg,#7b868d 0%,#d9e0e2 36%,#171c20 100%)",marginBottom:8}}>
+          <div style={{position:"absolute",left:12,top:12,display:"inline-flex",alignItems:"center",gap:6,
+            borderRadius:999,background:"rgba(0,0,0,0.56)",padding:"4px 8px",color:"#fff",fontSize:11,fontWeight:700}}>
+            <span style={{width:16,height:16,borderRadius:"50%",border:"1.4px solid rgba(255,255,255,0.85)",display:"grid",placeItems:"center",fontSize:8}}>▶</span>
+            3 HR
+          </div>
+          <div style={{position:"absolute",inset:0,background:"linear-gradient(to top, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0.08) 56%)"}}/>
+          <div style={{position:"absolute",left:16,right:16,bottom:14}}>
+            <div style={{fontSize:12,color:"rgba(255,255,255,0.76)",marginBottom:4}}>SiriusXM's Radio Andy Presents:</div>
+            <div style={{fontSize:16,fontWeight:700,color:"#fff",lineHeight:1.12,letterSpacing:"-0.02em",maxWidth:270}}>
+              SiriusXM Front Row with the Cast of Bravo's Summer House
+            </div>
+          </div>
+          <div style={{position:"absolute",right:16,bottom:14,width:46,height:46,borderRadius:"50%",background:"#fff",display:"grid",placeItems:"center"}}>
+            <span style={{fontSize:18,color:"#111",marginLeft:1}}>🔔</span>
+          </div>
+        </div>
+      </div>
+      <div style={{flexShrink:0,background:"#101316",padding:"8px 20px 14px",
+        borderTop:"1px solid rgba(255,255,255,0.04)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",paddingTop:6}}>
+          {["Discover","Channels","Search","Library"].map((item,i)=>(
+            <div key={item} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6,color:i===0?"#fff":"rgba(255,255,255,0.5)"}}>
+              <div style={{fontSize:20,lineHeight:1}}>{["♞","◉","⌕","▯"][i]}</div>
+              <div style={{fontSize:12,fontWeight:500}}>{item}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{width:134,height:5,borderRadius:999,background:"#fff",margin:"16px auto 0",opacity:0.95}}/>
+      </div>
+    </div>
+  );
+}
+
+// ─── Now Playing View ─────────────────────────────────────────────────────────
+function MobileNowPlayingView({home, away, homeScore, awayScore, matchState, clock, league, isWC, coverageLabel, dateLabel, leagueColor}){
+  const statusPill = matchState==="Live" ? (clock || "LIVE")
+    : matchState==="Halftime" ? "HT"
+    : matchState==="Extra Time" ? "ET"
+    : matchState==="Upcoming" ? "UP NEXT"
+    : "FINAL";
+  return (
+    <div style={{overflowY:"auto",maxHeight:596,
+      background:`radial-gradient(circle at top, ${away.color}33 0%, transparent 38%), linear-gradient(135deg, #121417 0%, #0c0f12 54%, #16233b 100%)`,
+      padding:"8px 14px 18px"}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,color:"rgba(255,255,255,0.7)",marginBottom:14}}>
+        <span style={{fontSize:18}}>⌄</span>
+        <div style={{flex:1,display:"flex",justifyContent:"center"}}>
+          <div style={{minWidth:206,height:38,borderRadius:999,background:"#050505",display:"grid",placeItems:"center",
+            padding:"0 16px",boxShadow:"inset 0 0 0 1px rgba(255,255,255,0.03)"}}>
+            <div style={{fontSize:11,fontWeight:700,color:"rgba(255,255,255,0.55)"}}>Ch 80</div>
+            <div style={{fontSize:13,fontWeight:800,color:"#fff",marginTop:-1}}>{coverageLabel}</div>
+          </div>
+        </div>
+        <span style={{fontSize:18}}>⤴</span>
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:8,padding:"0 2px"}}>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10,flex:"0 0 104px"}}>
+          <div style={{width:104,height:104,borderRadius:"50%",background:home.color,display:"grid",placeItems:"center",
+            boxShadow:"0 18px 36px rgba(0,0,0,0.3)"}}>
+            <TeamLogoAny team={home} isWC={isWC} size={68}/>
+          </div>
+          <div style={{fontSize:46,fontWeight:900,color:"#f8fafc",letterSpacing:"-0.05em",lineHeight:1}}>
+            <AnimatedScore value={homeScore} visible={matchState!=="Upcoming"} hiddenValue="—" accent="rgba(96,165,250,0.85)"
+              style={{fontSize:46,fontWeight:900,color:"#f8fafc",letterSpacing:"-0.05em",lineHeight:1}}/>
+          </div>
+          <div style={{fontSize:14,color:"rgba(255,255,255,0.82)",textAlign:"center",maxWidth:104,lineHeight:1.15}}>{home.name}</div>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:14,paddingTop:18,flex:"0 0 78px"}}>
+          <div style={{fontSize:22,color:"rgba(255,255,255,0.66)",fontWeight:300}}> - </div>
+          <div style={{borderRadius:999,background:"rgba(255,255,255,0.09)",padding:"8px 12px",
+            border:"1px solid rgba(255,255,255,0.06)",display:"inline-flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:13,color:"#60a5fa"}}>≣</span>
+            <span style={{fontSize:13,fontWeight:800,color:"rgba(255,255,255,0.75)"}}>{statusPill}</span>
+          </div>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10,flex:"0 0 104px"}}>
+          <div style={{width:104,height:104,borderRadius:"50%",background:away.color,display:"grid",placeItems:"center",
+            boxShadow:"0 18px 36px rgba(0,0,0,0.3)"}}>
+            <TeamLogoAny team={away} isWC={isWC} size={68}/>
+          </div>
+          <div style={{fontSize:46,fontWeight:900,color:"#f8fafc",letterSpacing:"-0.05em",lineHeight:1}}>
+            <AnimatedScore value={awayScore} visible={matchState!=="Upcoming"} hiddenValue="—" accent="rgba(96,165,250,0.85)"
+              style={{fontSize:46,fontWeight:900,color:"#f8fafc",letterSpacing:"-0.05em",lineHeight:1}}/>
+          </div>
+          <div style={{fontSize:14,color:"rgba(255,255,255,0.82)",textAlign:"center",maxWidth:104,lineHeight:1.15}}>{away.name}</div>
+        </div>
+      </div>
+      <div style={{marginTop:18,padding:"0 2px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:6}}>
+          <div>
+            <div style={{display:"inline-flex",alignItems:"center",color:leagueColor || "#fff",
+              fontSize:14,fontWeight:900,marginBottom:6}}>{league}</div>
+            <div style={{fontSize:13,color:"rgba(255,255,255,0.5)"}}>{dateLabel}</div>
+          </div>
+          <div style={{fontSize:18,fontWeight:900,color:"#ef4444",fontStyle:"italic"}}>ESPN</div>
+        </div>
+        <div style={{height:22,display:"flex",alignItems:"center"}}>
+          <div style={{position:"relative",width:"100%",height:4,borderRadius:999,background:"rgba(255,255,255,0.15)"}}>
+            <div style={{position:"absolute",left:0,top:0,bottom:0,width:"84%",borderRadius:999,
+              background:"repeating-linear-gradient(90deg,#fff 0 10px,transparent 10px 12px)"}}/>
+            <div style={{position:"absolute",left:"84%",top:"50%",transform:"translate(-50%,-50%)",width:10,height:10,borderRadius:"50%",background:"#fff"}}/>
+          </div>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:13,color:"rgba(255,255,255,0.72)",marginTop:4}}>
+          <span>11:33pm</span>
+          <span>{matchState==="Live" ? `LIVE ${clock ? `· ${clock}` : ""}` : statusPill}</span>
+        </div>
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:16,padding:"0 4px"}}>
+        {["↺15","⏮","⏸","⏭","15↻"].map((icon,i)=>(
+          <div key={i} style={{width:i===2?52:38,height:i===2?52:38,borderRadius:"50%",
+            background:i===2?"rgba(255,255,255,0.1)":"transparent",display:"grid",placeItems:"center",
+            color:"#fff",fontSize:i===2?24:16,fontWeight:700}}>{icon}</div>
+        ))}
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:16,padding:"0 8px",color:"rgba(255,255,255,0.82)"}}>
+        {["▣","↻","◉","⋯"].map((icon,i)=>(
+          <div key={i} style={{fontSize:21}}>{icon}</div>
+        ))}
+      </div>
+      <div style={{marginTop:18,borderRadius:24,background:"linear-gradient(180deg, rgba(19,24,28,0.95), rgba(14,18,21,0.98))",
+        border:"1px solid rgba(255,255,255,0.04)",padding:"16px 16px"}}>
+        <div style={{fontSize:15,fontWeight:900,color:"#fff",marginBottom:6}}>Live {league} games</div>
+        <div style={{fontSize:12,color:"rgba(255,255,255,0.56)"}}>
+          Follow the active matchup and jump between national, home, and away coverage.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Sports Home Nav View ────────────────────────────────────────────────────
+function MobileHomeNavView({home, away, league, leagueImage, leagueAbbr, coverageLabel, venue, dateLabel, isWC, leagueColor}){
+  const activeLeagueKey = league.toLowerCase().includes("world cup") ? "FIFA World Cup"
+    : league.toLowerCase().includes("premier") || league.toLowerCase() === "epl" ? "EPL"
+    : "";
+  const exploreCards = HOME_NAV_LEAGUES.map((item, i)=>({
+    title:item.abbr === activeLeagueKey ? (leagueAbbr || item.abbr) : item.abbr,
+    image:assetUrl(item.image),
+    accent:i % 2 === 0 ? home.color : away.color,
+  }));
+
+  return (
+    <div style={{height:596,display:"flex",flexDirection:"column",overflow:"hidden",
+      background:`radial-gradient(circle at top, ${leagueColor}33 0%, transparent 34%), linear-gradient(180deg,#10161e 0%,#0d1218 44%,#0a0f14 100%)`,
+      fontFamily:"'Helvetica Now Text','Helvetica Neue',Helvetica,Arial,sans-serif"}}>
+      <div style={{flex:1,overflowY:"auto",padding:"12px 20px 18px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+          <div style={{fontSize:24,fontWeight:900,color:"#fff",letterSpacing:"-0.04em"}}>Sports</div>
+          <div style={{display:"flex",gap:10,alignItems:"center"}}>
+            <div style={{width:28,height:28,borderRadius:"50%",background:"rgba(255,255,255,0.08)",
+              display:"grid",placeItems:"center",color:"#fff",fontSize:13}}>⌕</div>
+            <div style={{width:28,height:28,borderRadius:"50%",background:"rgba(255,255,255,0.08)",
+              display:"grid",placeItems:"center",color:"#fff",fontSize:14}}>◦</div>
+          </div>
+        </div>
+
+        <div style={{display:"flex",gap:18,marginBottom:20,overflowX:"auto",paddingBottom:4}}>
+          {["For You","Games","Leagues","Shows"].map((item,i)=>(
+            <div key={item} style={{position:"relative",whiteSpace:"nowrap",paddingBottom:8,
+              fontSize:14,fontWeight:700,color:i===0?"#fff":"rgba(255,255,255,0.48)"}}>
+              {item}
+              {i===0 && <div style={{position:"absolute",left:0,right:0,bottom:0,height:3,borderRadius:99,background:leagueColor}}/>}
+            </div>
+          ))}
+        </div>
+
+        <div style={{borderRadius:28,overflow:"hidden",position:"relative",marginBottom:24,
+          background:`linear-gradient(135deg, ${home.color} 0%, ${home.color} 47%, ${away.color} 53%, ${away.color} 100%)`,
+          minHeight:204,boxShadow:"0 20px 42px rgba(0,0,0,0.35)"}}>
+          <div style={{position:"absolute",inset:0,background:"linear-gradient(180deg,rgba(255,255,255,0.06),rgba(0,0,0,0.22))"}}/>
+          <div style={{position:"absolute",left:"50%",top:-22,bottom:-22,width:2,background:"rgba(255,255,255,0.35)",
+            transform:"translateX(-50%) rotate(17deg)"}}/>
+          <div style={{position:"absolute",left:18,top:18,display:"flex",alignItems:"center",gap:8,
+            borderRadius:999,background:`${leagueColor}D9`,padding:"6px 10px",backdropFilter:"blur(8px)"}}>
+            <LeagueLogo dataset={{leagueImage}} size={18}/>
+            <span style={{fontSize:10,fontWeight:800,letterSpacing:"0.08em",textTransform:"uppercase",color:fg(leagueColor || "#111111")}}>
+              {leagueAbbr || league}
+            </span>
+          </div>
+          <div style={{position:"relative",zIndex:1,padding:"64px 18px 18px",display:"flex",justifyContent:"space-between",alignItems:"flex-end"}}>
+            <div style={{display:"flex",flexDirection:"column",gap:10,alignItems:"flex-start",maxWidth:124}}>
+              <TeamLogoAny team={home} isWC={isWC} size={58}/>
+              <div style={{fontSize:20,fontWeight:900,color:"#fff",lineHeight:1,letterSpacing:"-0.03em"}}>{home.abbr}</div>
+              <div style={{fontSize:12,fontWeight:700,color:"rgba(255,255,255,0.88)",lineHeight:1.15}}>{home.name}</div>
+            </div>
+            <div style={{paddingBottom:8,textAlign:"center"}}>
+              <div style={{fontSize:11,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"rgba(255,255,255,0.74)",marginBottom:8}}>
+                Featured Match
+              </div>
+              <div style={{fontSize:12,color:"rgba(255,255,255,0.72)",fontWeight:700}}>{dateLabel}</div>
+              <div style={{fontSize:11,color:"rgba(255,255,255,0.58)",marginTop:4}}>{coverageLabel} • {venue}</div>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:10,alignItems:"flex-end",maxWidth:124,textAlign:"right"}}>
+              <TeamLogoAny team={away} isWC={isWC} size={58}/>
+              <div style={{fontSize:20,fontWeight:900,color:"#fff",lineHeight:1,letterSpacing:"-0.03em"}}>{away.abbr}</div>
+              <div style={{fontSize:12,fontWeight:700,color:"rgba(255,255,255,0.88)",lineHeight:1.15}}>{away.name}</div>
+            </div>
+          </div>
+        </div>
+
+        <div style={{marginBottom:22}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:12}}>
+            <div style={{fontSize:16,fontWeight:900,color:"#fff",letterSpacing:"-0.02em"}}>Explore leagues</div>
+            <div style={{fontSize:11,fontWeight:700,color:"rgba(255,255,255,0.42)"}}>Editable in controls</div>
+          </div>
+          <div style={{display:"flex",gap:14,overflowX:"auto",paddingBottom:6}}>
+            {exploreCards.map((card, i)=>(
+              <div key={i} style={{minWidth:132}}>
+                <div style={{width:132,height:132,borderRadius:999,overflow:"hidden",marginBottom:10,
+                  background:leagueColor,
+                  display:"grid",placeItems:"center",border:"1px solid rgba(0, 0, 0, 0.2)"}}>
+                  {card.image
+                    ? <img src={card.image} alt={card.title} style={{width:"70%",height:"70%",objectFit:"contain",display:"block"}}/>
+                    : <div style={{fontSize:18,fontWeight:900,color:"#fff",letterSpacing:"-0.03em"}}>{card.title}</div>}
+                </div>
+                <div style={{fontSize:14,fontWeight:800,color:"#fff",lineHeight:1.15,textAlign:"center",
+                  minHeight:32,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>
+                  {card.title}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={{borderRadius:20,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.05)",
+          padding:"14px 15px"}}>
+          <div style={{fontSize:15,fontWeight:900,color:"#fff",marginBottom:5}}>Ways to listen</div>
+          <div style={{fontSize:12,color:"rgba(255,255,255,0.58)",lineHeight:1.35}}>
+            Jump back into live match coverage, league hubs, and team-specific audio from the sports home feed.
+          </div>
+        </div>
+      </div>
+      <div style={{flexShrink:0,background:"#0a0f14",padding:"8px 20px 14px",borderTop:"1px solid rgba(255,255,255,0.04)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",paddingTop:6}}>
+          {["Discover","Channels","Search","Library"].map((item,i)=>(
+            <div key={item} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6,color:i===0?"#fff":"rgba(255,255,255,0.5)"}}>
+              <div style={{fontSize:20,lineHeight:1}}>{["♞","◉","⌕","▯"][i]}</div>
+              <div style={{fontSize:12,fontWeight:500}}>{item}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{width:134,height:5,borderRadius:999,background:"#fff",margin:"16px auto 0",opacity:0.95}}/>
+      </div>
+    </div>
+  );
+}
+
+// ─── Gallery Chip ─────────────────────────────────────────────────────────────
+function TeamChip({team,isWC,isHome,isAway,onClick,onRightClick}){
+  const fgc=fg(team.color);
+  return (
+    <div onClick={onClick} onContextMenu={e=>{e.preventDefault();onRightClick();}}
+      style={{background:team.color,borderRadius:14,padding:"12px 8px",cursor:"pointer",
+        textAlign:"center",
+        border:isHome?"2.5px solid #f8fafc":isAway?"2.5px dashed rgba(255,255,255,0.7)":"2px solid transparent",
+        boxShadow:(isHome||isAway)?`0 0 22px ${team.color}99`:"0 4px 14px rgba(0,0,0,0.35)",
+        position:"relative",userSelect:"none",display:"flex",flexDirection:"column",alignItems:"center",gap:5}}>
+      {isHome&&<div style={{position:"absolute",top:4,right:6,fontSize:8,fontWeight:900,color:fgc,opacity:0.85}}>H</div>}
+      {isAway&&<div style={{position:"absolute",top:4,right:6,fontSize:8,fontWeight:900,color:fgc,opacity:0.85}}>A</div>}
+      {isWC
+        ? <img src={flagImageUrl(team.flag)} alt={team.name} style={{width:28,height:28,objectFit:"contain",display:"block"}}/>
+        : <EplLogo team={team} size={38}/>
+      }
+      <div style={{fontSize:13,fontWeight:900,color:fgc,letterSpacing:"0.02em"}}>{team.abbr}</div>
+      <div style={{fontSize:9,color:fgc,opacity:0.6,lineHeight:1.2}}>{team.name}</div>
+      <div style={{fontSize:8,color:fgc,opacity:0.35,fontFamily:"monospace"}}>{team.color}</div>
+    </div>
+  );
+}
+
+// ─── Shared form styles ───────────────────────────────────────────────────────
+const inp={
+  background:"rgba(255,255,255,0.055)",border:"1px solid rgba(255,255,255,0.09)",
+  borderRadius:10,color:"#e2e8f0",padding:"9px 11px",fontSize:13,
+  fontFamily:"inherit",outline:"none",width:"100%",boxSizing:"border-box",
+};
+function Label({children}){
+  return <div style={{fontSize:10,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",
+    color:"#64748b",marginBottom:5}}>{children}</div>;
+}
+function Field({label,children}){
+  return <div style={{display:"flex",flexDirection:"column",flex:"1 1 0"}}>
+    <Label>{label}</Label>{children}
+  </div>;
+}
+function PreviewStat({label, value}){
+  return (
+    <div style={{borderRadius:12,background:"rgba(255,255,255,0.035)",
+      border:"1px solid rgba(255,255,255,0.06)",padding:"10px 12px"}}>
+      <div style={{fontSize:9,fontWeight:800,letterSpacing:"0.08em",textTransform:"uppercase",
+        color:"#64748b",marginBottom:4}}>{label}</div>
+      <div style={{fontSize:13,fontWeight:700,color:"#e2e8f0",lineHeight:1.3}}>{value}</div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ─── APP ──────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+function App(){
+  const datasetKeys = Object.keys(DATASETS);
+  const initialDatasetKey = datasetKeys.includes("epl") ? "epl" : datasetKeys[0];
+  const initialDataset = DATASETS[initialDatasetKey];
+  const defaultRealtimeUrl = "https://sports-cache-dev.streaming.siriusxm.com/playbackservices/v1/sports/event/dbf2edbb-9506-31c2-9ee1-01dfa173e948/scores";
+  const [tab,setTab]               = useState(initialDatasetKey);
+  const [homeIdx,setHomeIdx]       = useState(0);
+  const [awayIdx,setAwayIdx]       = useState(getDefaultAwayIndex(initialDataset.teams));
+  const [homeScore,setHomeScore]   = useState(2);
+  const [awayScore,setAwayScore]   = useState(1);
+  const [matchState,setMatchState] = useState("Live");
+  const [clock,setClock]           = useState("74'");
+  const [league,setLeague]         = useState(initialDataset.label);
+  const [bgMode,setBgMode]         = useState("blend");
+  const [customBg,setCustomBg]     = useState("#0f172a");
+  const [search,setSearch]         = useState("");
+  const [splitA,setSplitA]         = useState(0);
+  const [splitB,setSplitB]         = useState(4);
+  const [dateLabel,setDateLabel]   = useState("Saturday · 12:30 PM ET");
+  const [venue,setVenue]           = useState("Emirates Stadium");
+  const [coverageLabel,setCoverageLabel] = useState("SiriusXM FC");
+  const [leagueAbbreviation,setLeagueAbbreviation] = useState(initialDataset.label);
+  const [leagueBackgroundColor,setLeagueBackgroundColor] = useState(initialDataset.leagueColor);
+  const [realtimeEnabled,setRealtimeEnabled] = useState(true);
+  const [realtimeUrl,setRealtimeUrl] = useState(defaultRealtimeUrl);
+  const [pollMs,setPollMs] = useState(15000);
+  const [realtimeData,setRealtimeData] = useState(null);
+  const [realtimeStatus,setRealtimeStatus] = useState("Realtime feed idle");
+  const [realtimeError,setRealtimeError] = useState("");
+  const [isRealtimeLoading,setIsRealtimeLoading] = useState(false);
+  const [scoreSoundEnabled,setScoreSoundEnabled] = useState(true);
+  const [audioReady,setAudioReady] = useState(false);
+  const [replayIncrementMinutes,setReplayIncrementMinutes] = useState(1);
+  const [replayMode,setReplayMode] = useState(false);
+  const [isReplayPlaying,setIsReplayPlaying] = useState(false);
+  const [replayFrameIndex,setReplayFrameIndex] = useState(0);
+  const activeRequestRef = useRef(0);
+  const audioContextRef = useRef(null);
+  const prevActiveScoresRef = useRef(null);
+
+  const ds=DATASETS[tab] || initialDataset, teams=ds.teams, isWC=ds.isWC, isSoccer=ds.isSoccer;
+  const normalizedLeagueColor = normalizeHexColor(leagueBackgroundColor, normalizeHexColor(ds.leagueColor));
+  const home=teams[homeIdx]||teams[0], away=teams[awayIdx]||teams[1];
+  const safeHomeScore = clampScore(homeScore);
+  const safeAwayScore = clampScore(awayScore);
+  const normalizedClock = normalizeClock(matchState, clock);
+  const clockLocked = matchState === "Upcoming" || matchState === "Halftime" || matchState === "Full Time" || matchState === "Final";
+  const replayFrames = useMemo(
+    ()=>buildReplayFrames(realtimeData?.timeline || [], replayIncrementMinutes),
+    [realtimeData?.timeline, replayIncrementMinutes]
+  );
+  const replayFrame = replayFrames[replayFrameIndex] || replayFrames[0] || null;
+  const liveScores = realtimeEnabled && realtimeData ? {
+    homeScore:realtimeData.homeScore,
+    awayScore:realtimeData.awayScore,
+    matchState:realtimeData.matchState,
+    clock:normalizeClock(realtimeData.matchState, realtimeData.clock),
+  } : {
+    homeScore:safeHomeScore,
+    awayScore:safeAwayScore,
+    matchState,
+    clock:normalizedClock,
+  };
+  const activeScores = replayMode && replayFrame ? {
+    homeScore:replayFrame.homeScore,
+    awayScore:replayFrame.awayScore,
+    matchState:replayFrame.matchState,
+    clock:normalizeClock(replayFrame.matchState, replayFrame.clock),
+  } : liveScores;
+  const displayMatchup = getDisplayMatchup(home, away, activeScores.homeScore, activeScores.awayScore, isSoccer);
+  const displaySelection = isSoccer
+    ? { homeIdx, awayIdx }
+    : { homeIdx: awayIdx, awayIdx: homeIdx };
+
+  async function fetchRealtimeScores(){
+    const url = realtimeUrl.trim();
+    if(!url){
+      setRealtimeError("Enter a scores endpoint URL to enable realtime updates.");
+      setRealtimeStatus("Realtime feed missing URL");
+      setRealtimeData(null);
+      return;
+    }
+    const requestId = activeRequestRef.current + 1;
+    activeRequestRef.current = requestId;
+    setIsRealtimeLoading(true);
+    setRealtimeError("");
+    setRealtimeStatus("Fetching realtime scores...");
+    try{
+      const response = await fetch(url, { cache:"no-store" });
+      if(!response.ok){
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const payload = await response.json();
+      const next = deriveRealtimeState(payload);
+      if(activeRequestRef.current !== requestId) return;
+      if(!next){
+        setRealtimeData(null);
+        setRealtimeStatus("No score updates returned");
+        setRealtimeError("The endpoint responded, but no `scores` timeline was available.");
+        return;
+      }
+      setRealtimeData(next);
+      setRealtimeStatus(`Mapped ${next.timeline.length} update${next.timeline.length===1?"":"s"} from ${next.period}`);
+      setRealtimeError("");
+    }catch(error){
+      if(activeRequestRef.current !== requestId) return;
+      setRealtimeError(error?.message || "Unable to load realtime scores.");
+      setRealtimeStatus("Realtime feed unavailable");
+    }finally{
+      if(activeRequestRef.current === requestId) setIsRealtimeLoading(false);
+    }
+  }
+
+  useEffect(()=>{
+    if(!realtimeEnabled) return;
+    fetchRealtimeScores();
+  }, [realtimeEnabled, realtimeUrl]);
+
+  useEffect(()=>{
+    if(!realtimeEnabled) return;
+    const intervalMs = Math.max(3000, Number(pollMs) || 15000);
+    const timer = window.setInterval(fetchRealtimeScores, intervalMs);
+    return ()=>window.clearInterval(timer);
+  }, [realtimeEnabled, pollMs, realtimeUrl]);
+
+  useEffect(()=>{
+    if(replayFrameIndex >= replayFrames.length){
+      setReplayFrameIndex(Math.max(0, replayFrames.length - 1));
+    }
+  }, [replayFrameIndex, replayFrames.length]);
+
+  useEffect(()=>{
+    if(!replayMode || !isReplayPlaying || replayFrames.length <= 1) return;
+    const timer = window.setInterval(()=>{
+      setReplayFrameIndex(current=>{
+        if(current >= replayFrames.length - 1){
+          setIsReplayPlaying(false);
+          return current;
+        }
+        return current + 1;
+      });
+    }, 1000);
+    return ()=>window.clearInterval(timer);
+  }, [replayMode, isReplayPlaying, replayFrames.length]);
+
+  useEffect(()=>{
+    if(!scoreSoundEnabled) return;
+    function armAudio(){
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if(!AudioCtx) return;
+      if(!audioContextRef.current){
+        audioContextRef.current = new AudioCtx();
+      }
+      const ctx = audioContextRef.current;
+      if(ctx.state === "suspended"){
+        ctx.resume().catch(()=>{});
+      }
+      setAudioReady(ctx.state === "running" || ctx.state === "suspended");
+    }
+    window.addEventListener("pointerdown", armAudio, { passive:true });
+    window.addEventListener("keydown", armAudio);
+    return ()=>{
+      window.removeEventListener("pointerdown", armAudio);
+      window.removeEventListener("keydown", armAudio);
+    };
+  }, [scoreSoundEnabled]);
+
+  useEffect(()=>{
+    const nextSnapshot = {
+      homeScore:activeScores.homeScore,
+      awayScore:activeScores.awayScore,
+      matchState:activeScores.matchState,
+    };
+    const prevSnapshot = prevActiveScoresRef.current;
+    prevActiveScoresRef.current = nextSnapshot;
+    if(!prevSnapshot) return;
+    const homeIncreased = nextSnapshot.homeScore > prevSnapshot.homeScore;
+    const awayIncreased = nextSnapshot.awayScore > prevSnapshot.awayScore;
+    const eligibleState = nextSnapshot.matchState === "Live" || nextSnapshot.matchState === "Halftime" || nextSnapshot.matchState === "Extra Time" || nextSnapshot.matchState === "Final";
+    if(!scoreSoundEnabled || !eligibleState || (!homeIncreased && !awayIncreased)) return;
+    const ctx = audioContextRef.current;
+    if(!ctx) return;
+    if(ctx.state === "suspended"){
+      ctx.resume().then(()=>createCrowdCheer(ctx)).catch(()=>{});
+      return;
+    }
+    if(ctx.state === "running"){
+      createCrowdCheer(ctx);
+    }
+  }, [activeScores.homeScore, activeScores.awayScore, activeScores.matchState, scoreSoundEnabled]);
+
+  function startReplay(){
+    if(!replayFrames.length) return;
+    setReplayMode(true);
+    setReplayFrameIndex(0);
+    setIsReplayPlaying(replayFrames.length > 1);
+  }
+  function toggleReplayPlayback(){
+    if(!replayFrames.length) return;
+    if(!replayMode){
+      startReplay();
+      return;
+    }
+    if(replayFrameIndex >= replayFrames.length - 1){
+      setReplayFrameIndex(0);
+      setIsReplayPlaying(replayFrames.length > 1);
+      return;
+    }
+    setIsReplayPlaying(value=>!value);
+  }
+  function stopReplay(){
+    setIsReplayPlaying(false);
+    setReplayMode(false);
+  }
+
+  let stageBg;
+  if(bgMode==="blend")      stageBg=`linear-gradient(135deg,${displayMatchup.home.color}cc 0%,${displayMatchup.away.color}cc 100%)`;
+  else if(bgMode==="home")  stageBg=displayMatchup.home.color;
+  else if(bgMode==="away")  stageBg=displayMatchup.away.color;
+  else                      stageBg=customBg;
+
+  function switchTab(t){
+    const nextDataset = DATASETS[t];
+    const defaultAway = getDefaultAwayIndex(nextDataset.teams);
+    setTab(t);setHomeIdx(0);setAwayIdx(defaultAway);
+    setSplitA(0);setSplitB(defaultAway);
+    setLeague(nextDataset.label);
+    setDateLabel(nextDataset.isSoccer ? "Saturday · 12:30 PM ET" : "Sunday · 1:00 PM ET");
+    setVenue(nextDataset.isSoccer ? "Emirates Stadium" : `${nextDataset.label} Arena`);
+    setCoverageLabel(nextDataset.isSoccer ? "SiriusXM FC" : `${nextDataset.label} Radio`);
+    setLeagueAbbreviation(nextDataset.label);
+    setLeagueBackgroundColor(nextDataset.leagueColor);
+    setSearch("");
+  }
+  function swapTeams(){
+    const[h,a,hs,as_]=[homeIdx,awayIdx,safeHomeScore,safeAwayScore];
+    setHomeIdx(a);setAwayIdx(h);setHomeScore(as_);setAwayScore(hs);
+  }
+
+  const filtered=useMemo(()=>
+    teams.filter(t=>!search||
+      t.name.toLowerCase().includes(search.toLowerCase())||
+      t.abbr.toLowerCase().includes(search.toLowerCase())
+    ),[teams,search]);
+
+  const teamA_split=teams[splitA]||teams[0], teamB_split=teams[splitB]||teams[1];
+
+  const PRESETS = [
+    {label:"Live Matchup", hi:0, ai:Math.min(1, teams.length-1), hs:2, as_:1, s:"Live", c:isSoccer?"68'":"Q3"},
+    {label:"Final Matchup", hi:Math.min(2, teams.length-1), ai:Math.min(3, teams.length-1), hs:3, as_:2, s:"Final", c:"FT"},
+    {label:"Upcoming Matchup", hi:Math.min(4, teams.length-1), ai:Math.min(5, teams.length-1), hs:0, as_:0, s:"Upcoming", c:""},
+  ].map(p=>({
+    ...p,
+    ai:ensureDifferentIndex(p.ai, p.hi, teams.length),
+  }));
+
+  return (
+    <div style={{minHeight:"100vh",background:"#07090f",
+      fontFamily:"'DM Sans','Segoe UI',system-ui,sans-serif",color:"#e2e8f0",padding:"24px 20px"}}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700;900&display=swap');
+        *{box-sizing:border-box;}
+        select option{background:#1e293b;color:#e2e8f0;}
+        input:focus,select:focus{border-color:rgba(99,102,241,0.6)!important;box-shadow:0 0 0 2px rgba(99,102,241,0.15);}
+        input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+        @keyframes liveIconPulse{0%,100%{opacity:.65;transform:scale(.94)}50%{opacity:1;transform:scale(1)}}
+        @keyframes scorePulse{
+          0%{transform:translateY(14px) scale(0.72);opacity:0;filter:blur(6px)}
+          38%{transform:translateY(-5px) scale(1.16);opacity:1;filter:blur(0)}
+          62%{transform:translateY(1px) scale(0.96);opacity:1}
+          100%{transform:translateY(0) scale(1);opacity:1;filter:blur(0)}
+        }
+        .chip:hover{transform:translateY(-3px);}
+        .chip{transition:transform 0.12s,box-shadow 0.12s;}
+        .tab-btn{transition:background 0.15s;}
+        .tab-btn:hover{background:rgba(255,255,255,0.07)!important;}
+        .preset-btn:hover{opacity:0.8;}
+        ::-webkit-scrollbar{width:0;height:0;}
+      `}</style>
+
+      {/* Header */}
+      <div style={{maxWidth:1280,margin:"0 auto 20px"}}>
+        <div style={{display:"flex",alignItems:"baseline",gap:10,marginBottom:3}}>
+          <h1 style={{margin:0,fontSize:20,fontWeight:900,letterSpacing:"-0.02em",color:"#f8fafc"}}>
+            Realtime Sports Simuator SXM
+          </h1>
+          <span style={{fontSize:12,color:"#334155"}}>/ score + mobile layouts + color tools</span>
+        </div>
+        <p style={{margin:0,fontSize:12,color:"#475569"}}>
+          Workbook-driven league and team metadata from Sports Metadata 1.6.0, with league tabs, replay, and sport-specific ordering rules
+        </p>
+      </div>
+
+      {/* Tabs */}
+      <div style={{maxWidth:1280,margin:"0 auto 18px",display:"flex",gap:8,alignItems:"center"}}>
+        {Object.entries(DATASETS).map(([key,dataset])=>(
+          <button key={key} className="tab-btn" onClick={()=>switchTab(key)} style={{
+            padding:"9px 18px",borderRadius:12,cursor:"pointer",fontFamily:"inherit",
+            fontSize:13,fontWeight:700,border:"1px solid rgba(255,255,255,0.09)",
+            background:tab===key?"linear-gradient(180deg,#2563eb,#1d4ed8)":"rgba(255,255,255,0.04)",
+            color:tab===key?"#fff":"#94a3b8",borderColor:tab===key?"transparent":undefined,
+            display:"inline-flex",alignItems:"center",gap:10,
+          }}>
+            {dataset.isWC
+              ? <img
+                  src="FIFA26.png"
+                  alt="FIFA World Cup Trophy"
+                  style={{width:16,height:20,objectFit:"contain",display:"block",flexShrink:0}}
+                />
+              : <LeagueLogo dataset={dataset} size={20}/>
+            }
+            <span>{dataset.tabLabel}</span>
+          </button>
+        ))}
+        <span style={{marginLeft:"auto",fontSize:11,color:"#334155"}}>{teams.length} teams</span>
+      </div>
+      <div style={{maxWidth:1280,margin:"0 auto 18px",display:"flex",alignItems:"center",gap:14,
+        padding:"12px 14px",borderRadius:16,background:`linear-gradient(135deg, ${normalizedLeagueColor}26 0%, rgba(255,255,255,0.03) 100%)`,
+        border:`1px solid ${normalizedLeagueColor}66`}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
+          {!ds.isWC && <LeagueLogo dataset={ds} size={40}/>}
+          {ds.isWC && (
+            <img
+              src="FIFA26.png"
+              alt="FIFA World Cup Trophy"
+              style={{width:28,height:40,objectFit:"contain",display:"block"}}
+            />
+          )}
+        </div>
+        <div style={{minWidth:0}}>
+          <div style={{fontSize:11,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#64748b"}}>
+            Active League
+          </div>
+          <div style={{fontSize:16,fontWeight:800,color:"#f8fafc"}}>{ds.leagueName}</div>
+        </div>
+        <div style={{marginLeft:"auto",display:"flex",gap:10,flexWrap:"wrap",justifyContent:"flex-end"}}>
+          <PreviewStat label="League ID" value={ds.id}/>
+          <PreviewStat label="Primary Color" value={normalizedLeagueColor}/>
+        </div>
+      </div>
+
+      {/* ── Top 2-col: controls + card/split previews ── */}
+      <div style={{maxWidth:1280,margin:"0 auto",display:"grid",
+        gridTemplateColumns:"repeat(auto-fit,minmax(320px,1fr))",gap:18,alignItems:"start"}}>
+
+        {/* Controls */}
+        <div style={{background:"rgba(255,255,255,0.025)",border:"1px solid rgba(255,255,255,0.07)",
+          borderRadius:20,overflow:"hidden"}}>
+          <div style={{padding:"13px 16px 10px",borderBottom:"1px solid rgba(255,255,255,0.07)"}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#64748b"}}>Match Controls</div>
+          </div>
+          <div style={{padding:16,display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{display:"flex",gap:10}}>
+              <Field label="Home">
+                <select style={inp} value={homeIdx} onChange={e=>{
+                  const next = +e.target.value;
+                  setHomeIdx(next);
+                  if(next===awayIdx) setAwayIdx(ensureDifferentIndex(next, awayIdx, teams.length));
+                }}>
+                  {teams.map((t,i)=><option key={i} value={i}>{t.abbr} — {t.name}</option>)}
+                </select>
+              </Field>
+              <Field label="Away">
+                <select style={inp} value={awayIdx} onChange={e=>{
+                  const next = +e.target.value;
+                  setAwayIdx(next);
+                  if(next===homeIdx) setHomeIdx(ensureDifferentIndex(next, homeIdx, teams.length));
+                }}>
+                  {teams.map((t,i)=><option key={i} value={i}>{t.abbr} — {t.name}</option>)}
+                </select>
+              </Field>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:8,alignItems:"end"}}>
+              <Field label="Home Score">
+                <input style={{...inp,opacity:realtimeEnabled?0.68:1,cursor:realtimeEnabled?"not-allowed":"text"}}
+                  type="number" min={0} max={20} value={safeHomeScore}
+                  disabled={realtimeEnabled}
+                  onChange={e=>setHomeScore(clampScore(+e.target.value))}/>
+              </Field>
+              <button onClick={swapTeams} style={{background:"rgba(255,255,255,0.05)",
+                border:"1px solid rgba(255,255,255,0.08)",borderRadius:10,color:"#94a3b8",
+                cursor:"pointer",padding:"9px 8px",fontSize:14,lineHeight:1,fontFamily:"inherit"}}>⇄</button>
+              <Field label="Away Score">
+                <input style={{...inp,opacity:realtimeEnabled?0.68:1,cursor:realtimeEnabled?"not-allowed":"text"}}
+                  type="number" min={0} max={20} value={safeAwayScore}
+                  disabled={realtimeEnabled}
+                  onChange={e=>setAwayScore(clampScore(+e.target.value))}/>
+              </Field>
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <Field label="State">
+                <select style={{...inp,opacity:realtimeEnabled?0.68:1,cursor:realtimeEnabled?"not-allowed":"pointer"}}
+                  value={matchState} onChange={e=>setMatchState(e.target.value)} disabled={realtimeEnabled}>
+                  {STATES.map(s=><option key={s} value={s}>{s}</option>)}
+                </select>
+              </Field>
+              <Field label="Clock">
+                <input style={{...inp,opacity:(clockLocked||realtimeEnabled)?0.68:1,cursor:(clockLocked||realtimeEnabled)?"not-allowed":"text"}}
+                  value={normalizedClock} onChange={e=>setClock(e.target.value)} placeholder="74'"
+                  disabled={clockLocked||realtimeEnabled}/>
+              </Field>
+            </div>
+            <div style={{borderTop:"1px solid rgba(255,255,255,0.06)",paddingTop:11,display:"flex",flexDirection:"column",gap:10}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12}}>
+                <Label>Realtime Scores Feed</Label>
+                <label style={{display:"inline-flex",alignItems:"center",gap:8,cursor:"pointer"}}>
+                  <input type="checkbox" checked={realtimeEnabled} onChange={e=>setRealtimeEnabled(e.target.checked)}/>
+                  <span style={{fontSize:12,fontWeight:700,color:"#cbd5e1"}}>Use live endpoint</span>
+                </label>
+              </div>
+              <Field label="Scores Endpoint URL">
+                <input style={inp} value={realtimeUrl} onChange={e=>setRealtimeUrl(e.target.value)}
+                  placeholder="https://sports-cache-dev.streaming.siriusxm.com/.../scores"/>
+              </Field>
+              <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:10,alignItems:"end"}}>
+                <Field label="Poll Interval (ms)">
+                  <input style={inp} type="number" min={3000} step={1000} value={pollMs}
+                    onChange={e=>setPollMs(Math.max(3000, +e.target.value || 3000))}/>
+                </Field>
+                <button onClick={fetchRealtimeScores} style={{background:"rgba(37,99,235,0.18)",
+                  border:"1px solid rgba(96,165,250,0.28)",borderRadius:10,color:"#bfdbfe",
+                  cursor:"pointer",padding:"10px 14px",fontSize:12,fontWeight:700,fontFamily:"inherit",height:40}}>
+                  {isRealtimeLoading ? "Refreshing..." : "Refresh now"}
+                </button>
+              </div>
+              <label style={{display:"inline-flex",alignItems:"center",gap:8,cursor:"pointer"}}>
+                <input type="checkbox" checked={scoreSoundEnabled} onChange={e=>setScoreSoundEnabled(e.target.checked)}/>
+                <span style={{fontSize:12,fontWeight:700,color:"#cbd5e1"}}>Play crowd cheer on score changes</span>
+              </label>
+              <div style={{borderRadius:12,background:"rgba(255,255,255,0.035)",border:"1px solid rgba(255,255,255,0.06)",padding:"10px 12px"}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:10}}>
+                  <div>
+                    <div style={{fontSize:12,fontWeight:700,color:"#e2e8f0"}}>Event Replay</div>
+                    <div style={{fontSize:10,color:"#64748b",marginTop:3}}>Replay the score timeline in 1 to 5 minute buckets.</div>
+                  </div>
+                  <label style={{display:"inline-flex",alignItems:"center",gap:8,cursor:"pointer"}}>
+                    <input type="checkbox" checked={replayMode} onChange={e=>{
+                      const enabled = e.target.checked;
+                      setReplayMode(enabled);
+                      if(!enabled) setIsReplayPlaying(false);
+                    }} disabled={!replayFrames.length}/>
+                    <span style={{fontSize:12,fontWeight:700,color:replayFrames.length?"#cbd5e1":"#64748b"}}>Use replay</span>
+                  </label>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr auto auto auto",gap:8,alignItems:"end"}}>
+                  <Field label="Increment">
+                    <select style={inp} value={replayIncrementMinutes} onChange={e=>{
+                      setReplayIncrementMinutes(+e.target.value);
+                      setReplayFrameIndex(0);
+                      setIsReplayPlaying(false);
+                    }}>
+                      {[1,2,3,4,5].map(min=>(
+                        <option key={min} value={min}>{min} min</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <button onClick={startReplay} disabled={!replayFrames.length} style={{background:"rgba(37,99,235,0.18)",
+                    border:"1px solid rgba(96,165,250,0.28)",borderRadius:10,color:replayFrames.length?"#bfdbfe":"#64748b",
+                    cursor:replayFrames.length?"pointer":"not-allowed",padding:"10px 12px",fontSize:12,fontWeight:700,fontFamily:"inherit",height:40}}>
+                    Start
+                  </button>
+                  <button onClick={toggleReplayPlayback} disabled={!replayFrames.length} style={{background:"rgba(255,255,255,0.06)",
+                    border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,color:replayFrames.length?"#e2e8f0":"#64748b",
+                    cursor:replayFrames.length?"pointer":"not-allowed",padding:"10px 12px",fontSize:12,fontWeight:700,fontFamily:"inherit",height:40}}>
+                    {isReplayPlaying ? "Pause" : replayFrameIndex >= Math.max(0, replayFrames.length - 1) ? "Restart" : "Play"}
+                  </button>
+                  <button onClick={stopReplay} disabled={!replayMode} style={{background:"rgba(255,255,255,0.04)",
+                    border:"1px solid rgba(255,255,255,0.08)",borderRadius:10,color:replayMode?"#cbd5e1":"#64748b",
+                    cursor:replayMode?"pointer":"not-allowed",padding:"10px 12px",fontSize:12,fontWeight:700,fontFamily:"inherit",height:40}}>
+                    Live
+                  </button>
+                </div>
+                <div style={{marginTop:10}}>
+                  <input type="range" min={0} max={Math.max(0, replayFrames.length - 1)} step={1}
+                    value={Math.min(replayFrameIndex, Math.max(0, replayFrames.length - 1))}
+                    onChange={e=>{
+                      setReplayMode(true);
+                      setIsReplayPlaying(false);
+                      setReplayFrameIndex(+e.target.value);
+                    }}
+                    disabled={!replayFrames.length}
+                    style={{width:"100%"}}/>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",gap:12,marginTop:8,fontSize:10,color:"#93c5fd"}}>
+                  <span>{replayFrames.length ? `${replayFrames.length} replay frame${replayFrames.length===1?"":"s"}` : "Replay unavailable until timeline loads"}</span>
+                  <span>{replayFrame ? `${replayFrame.label} · ${replayFrame.period} · ${replayFrame.homeScore}-${replayFrame.awayScore}` : "No replay frame selected"}</span>
+                </div>
+                {replayFrame && (
+                  <div style={{fontSize:10,color:"#64748b",marginTop:6}}>
+                    Replay timestamp: {formatFeedTimestamp(replayFrame.timestamp)}
+                  </div>
+                )}
+              </div>
+              <div style={{borderRadius:12,background:"rgba(255,255,255,0.035)",border:"1px solid rgba(255,255,255,0.06)",padding:"10px 12px"}}>
+                <div style={{fontSize:12,fontWeight:700,color:"#e2e8f0"}}>{realtimeStatus}</div>
+                <div style={{fontSize:11,color:realtimeError?"#fca5a5":"#64748b",marginTop:4,lineHeight:1.4}}>
+                  {realtimeError || `Latest update: ${formatFeedTimestamp(realtimeData?.timestamp)}`}
+                </div>
+                <div style={{fontSize:10,color:"#93c5fd",marginTop:6}}>
+                  Sound status: {scoreSoundEnabled ? (audioReady ? "armed after interaction" : "tap or click once to arm audio") : "muted"}
+                </div>
+                {realtimeData && (
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:8,marginTop:10}}>
+                    {realtimeData.timeline.slice(0,4).map(item=>(
+                      <div key={item.id} style={{borderRadius:10,background:"rgba(15,23,42,0.65)",padding:"8px 9px"}}>
+                        <div style={{fontSize:9,fontWeight:800,letterSpacing:"0.08em",textTransform:"uppercase",color:"#93c5fd"}}>{item.period}</div>
+                        <div style={{fontSize:13,fontWeight:800,color:"#f8fafc",marginTop:3}}>{item.homeScore} - {item.awayScore}</div>
+                        <div style={{fontSize:10,color:"#64748b",marginTop:2}}>{formatFeedTimestamp(item.timestamp)}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+            <Field label="League Label">
+              <input style={inp} value={league} onChange={e=>setLeague(e.target.value)}/>
+            </Field>
+            <Field label="League Background">
+              <input style={inp} value={leagueBackgroundColor} onChange={e=>setLeagueBackgroundColor(e.target.value)}
+                placeholder="3d195b or #3D195B"/>
+            </Field>
+            <div style={{display:"flex",gap:10}}>
+              <Field label="Date / Time">
+                <input style={inp} value={dateLabel} onChange={e=>setDateLabel(e.target.value)}/>
+              </Field>
+              <Field label="Venue">
+                <input style={inp} value={venue} onChange={e=>setVenue(e.target.value)}/>
+              </Field>
+            </div>
+            <Field label="Coverage">
+              <input style={inp} value={coverageLabel} onChange={e=>setCoverageLabel(e.target.value)}/>
+            </Field>
+            <Field label="League Abbreviation">
+              <input style={inp} value={leagueAbbreviation} onChange={e=>setLeagueAbbreviation(e.target.value)}
+                placeholder="EPL"/>
+            </Field>
+            <Field label="Stage Background">
+              <select style={inp} value={bgMode} onChange={e=>setBgMode(e.target.value)}>
+                <option value="blend">Blend both colors</option>
+                <option value="home">Home team color</option>
+                <option value="away">Away team color</option>
+                <option value="custom">Custom color</option>
+              </select>
+            </Field>
+            {bgMode==="custom"&&(
+              <Field label="Custom Color">
+                <input type="color" value={customBg} onChange={e=>setCustomBg(e.target.value)}
+                  style={{...inp,padding:"4px 6px",height:40,cursor:"pointer"}}/>
+              </Field>
+            )}
+            <div style={{borderTop:"1px solid rgba(255,255,255,0.06)",paddingTop:11}}>
+              <Label>Quick Presets</Label>
+              <div style={{display:"flex",flexDirection:"column",gap:7,marginTop:2}}>
+                {PRESETS.map(p=>(
+                  <button key={p.label} className="preset-btn" onClick={()=>{
+                    setHomeIdx(p.hi);setAwayIdx(p.ai);
+                    setHomeScore(p.hs);setAwayScore(p.as_);
+                    setMatchState(p.s);setClock(p.c);
+                  }} style={{background:"rgba(99,102,241,0.1)",border:"1px solid rgba(99,102,241,0.22)",
+                    borderRadius:9,color:"#a5b4fc",cursor:"pointer",padding:"8px 11px",
+                    fontSize:12,fontWeight:700,fontFamily:"inherit",textAlign:"left"}}>
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Right col: score card + color split */}
+        <div style={{display:"flex",flexDirection:"column",gap:18}}>
+          <div style={{background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.07)",
+            borderRadius:20,padding:22}}>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",
+              color:"#64748b",marginBottom:14}}>Score Card</div>
+            <div style={{borderRadius:20,padding:"36px 28px",background:stageBg,
+              display:"flex",justifyContent:"center",alignItems:"center",minHeight:240,
+              position:"relative",overflow:"hidden",transition:"background 0.4s"}}>
+              <div style={{position:"absolute",inset:0,
+                background:"radial-gradient(ellipse at center,transparent 40%,rgba(0,0,0,0.4) 100%)",
+                pointerEvents:"none"}}/>
+              <ScoreCard home={displayMatchup.home} away={displayMatchup.away} homeScore={displayMatchup.homeScore} awayScore={displayMatchup.awayScore}
+                state={activeScores.matchState} clock={activeScores.clock} league={league} isWC={isWC} leagueColor={normalizedLeagueColor}/>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:10,marginTop:14}}>
+              <PreviewStat label="Date / Time" value={dateLabel}/>
+              <PreviewStat label="Venue" value={venue}/>
+              <PreviewStat label="Coverage" value={coverageLabel}/>
+            </div>
+          </div>
+          <div style={{background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.07)",
+            borderRadius:20,padding:22}}>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",
+              color:"#64748b",marginBottom:14}}>Color Split — 35°</div>
+            <div style={{display:"flex",gap:10,marginBottom:14}}>
+              <div style={{flex:1}}><Label>Team A</Label>
+                <select style={inp} value={splitA} onChange={e=>setSplitA(+e.target.value)}>
+                  {teams.map((t,i)=><option key={i} value={i}>{t.abbr} — {t.name}</option>)}
+                </select>
+              </div>
+              <div style={{flex:1}}><Label>Team B</Label>
+                <select style={inp} value={splitB} onChange={e=>setSplitB(+e.target.value)}>
+                  {teams.map((t,i)=><option key={i} value={i}>{t.abbr} — {t.name}</option>)}
+                </select>
+              </div>
+            </div>
+            <ColorSplitPreview teamA={teamA_split} teamB={teamB_split} isWC={isWC}/>
+            <div style={{display:"flex",justifyContent:"space-between",marginTop:12}}>
+              {[teamA_split,teamB_split].map((t,i)=>(
+                <div key={i} style={{display:"flex",alignItems:"center",gap:8}}>
+                  <div style={{width:18,height:18,borderRadius:5,background:t.color,
+                    border:"1px solid rgba(255,255,255,0.15)",flexShrink:0}}/>
+                  <div>
+                    <div style={{fontSize:12,fontWeight:700,color:"#94a3b8"}}>{t.abbr}</div>
+                    <div style={{fontSize:10,color:"#475569",fontFamily:"monospace"}}>{t.color}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ══ Mobile mockups row ══ */}
+      <div style={{maxWidth:1280,margin:"24px auto 0"}}>
+        <div style={{fontSize:10,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",
+          color:"#64748b",marginBottom:20}}>Mobile Previews — driven by match controls above</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(2, minmax(390px, 1fr))",gap:"24px 18px",justifyItems:"center"}}>
+          <PhoneFrame label="Discover View — Home">
+            <MobileDiscoverView
+              home={displayMatchup.home} away={displayMatchup.away} homeScore={displayMatchup.homeScore} awayScore={displayMatchup.awayScore}
+              matchState={activeScores.matchState} league={league} isWC={isWC} coverageLabel={coverageLabel} leagueColor={normalizedLeagueColor}/>
+          </PhoneFrame>
+          <PhoneFrame label="Sports Home Nav">
+            <MobileHomeNavView
+              home={displayMatchup.home} away={displayMatchup.away} league={league} isWC={isWC}
+              coverageLabel={coverageLabel} venue={venue} dateLabel={dateLabel}
+              leagueImage={ds.leagueImage} leagueAbbr={leagueAbbreviation} leagueColor={normalizedLeagueColor}/>
+          </PhoneFrame>
+          <PhoneFrame label="Now Playing — Channel">
+            <MobileNowPlayingView
+              home={displayMatchup.home} away={displayMatchup.away} homeScore={displayMatchup.homeScore} awayScore={displayMatchup.awayScore}
+              matchState={activeScores.matchState} clock={activeScores.clock} league={league} isWC={isWC}
+              coverageLabel={coverageLabel} dateLabel={dateLabel} leagueColor={normalizedLeagueColor}/>
+          </PhoneFrame>
+          <PhoneFrame label="List View — Today's Games">
+            <MobileListView
+              teams={teams} homeIdx={displaySelection.homeIdx} awayIdx={displaySelection.awayIdx}
+              homeScore={displayMatchup.homeScore} awayScore={displayMatchup.awayScore}
+              matchState={activeScores.matchState} clock={activeScores.clock} league={league} isWC={isWC} dateLabel={dateLabel} leagueColor={normalizedLeagueColor}/>
+          </PhoneFrame>
+          <PhoneFrame label="Detail View — Single Game">
+            <MobileDetailView
+              home={displayMatchup.home} away={displayMatchup.away} homeScore={displayMatchup.homeScore} awayScore={displayMatchup.awayScore}
+              matchState={activeScores.matchState} clock={activeScores.clock} league={league} isWC={isWC}
+              dateLabel={dateLabel} venue={venue} coverageLabel={coverageLabel} leagueColor={normalizedLeagueColor}/>
+          </PhoneFrame>
+        </div>
+      </div>
+
+      {/* Gallery */}
+      <div style={{maxWidth:1280,margin:"24px auto 0",
+        background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.07)",
+        borderRadius:20,padding:20}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+          marginBottom:14,flexWrap:"wrap",gap:10}}>
+          <div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:"#64748b"}}>
+              Team Palette — {filtered.length} of {teams.length}
+            </div>
+            <div style={{fontSize:11,color:"#334155",marginTop:2}}>
+              Left-click → Home · Right-click → Away
+            </div>
+          </div>
+          <input value={search} onChange={e=>setSearch(e.target.value)}
+            placeholder={`Search ${teams.length} teams…`}
+            style={{...inp,width:"auto",minWidth:220}}/>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(88px,1fr))",gap:9}}>
+          {filtered.map(t=>{
+            const ri=teams.indexOf(t);
+            return (
+              <div key={t.abbr} className="chip">
+                <TeamChip team={t} isWC={isWC} isHome={ri===homeIdx} isAway={ri===awayIdx}
+                  onClick={()=>{
+                    if(ri!==homeIdx&&ri!==awayIdx) setHomeIdx(ri);
+                    else if(ri===homeIdx){setHomeIdx(awayIdx);setAwayIdx(ri);}
+                  }}
+                  onRightClick={()=>{
+                    setAwayIdx(ri);
+                    if(ri===homeIdx) setHomeIdx(ensureDifferentIndex(ri, homeIdx, teams.length));
+                  }}/>
+              </div>
+            );
+          })}
+          {filtered.length===0&&(
+            <div style={{gridColumn:"1/-1",textAlign:"center",padding:"32px 0",
+              color:"#334155",fontSize:13}}>No teams match "{search}"</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(<App />);
+    </script>
+  </body>
+</html>
